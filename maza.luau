@@ -2195,6 +2195,8 @@ local Farm = {
 	AutoQuest      = false,
 	AutoAttack     = false,
 	Hitbox         = 18,
+	PlayerAttackHitbox = 30,
+	PlayerHitboxTest = false,
 	Depth          = 2,
 	AttackInterval = 0.025,
 	AttackRange    = 12,
@@ -2207,6 +2209,9 @@ local Farm = {
 	DamageDodgeDepth = 60,
 	RetreatDelay = 2.0,
 	_hitboxOriginals = setmetatable({}, { __mode = "k" }),
+	_mobHitboxOriginals = setmetatable({}, { __mode = "k" }),
+	_mobHitboxTarget = nil,
+	_mobHitboxNextAt = 0,
 	SelectedWeapon = "ช่อง 1",
 	_lastHotbarSelection = nil,
 	_lastHotbarCharacter = nil,
@@ -3305,6 +3310,13 @@ function FarmRetreat:FindUndergroundPosition(char, root, hum, target)
 end
 
 function FarmRetreat:BeginDamage(char, root, hum, target)
+	-- Auto Dungeon must stay on the mob and fight normally.
+	-- Never warp/retreat underground when taking damage in Dungeon mode.
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		self:Clear()
+		DamageBlock:Release()
+		return
+	end
 	local now = os.clock()
 	local retreating = self.Until > now
 	local delay = math.clamp(tonumber(Farm.RetreatDelay) or 1.2, 0.3, 5)
@@ -3348,6 +3360,19 @@ function FarmRetreat:Watch()
 		if _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN or player.Character ~= char then return end
 		if Farm.InputBlocked and Farm.InputBlocked() then return end
 
+		-- Dungeon only: taking damage must NEVER trigger the old underground
+		-- retreat/teleport. Stay at the current mob and continue attacking.
+		if Farm.Dungeon and Farm.Dungeon.Enabled then
+			DamageBlock:Release()
+			self:Clear()
+			Farm._counterAttackPending = true
+			farmCancelHitReactionAnimations(char)
+			-- Do not access CombatRuntime here: this callback is defined before
+			-- the local CombatRuntime table exists. attackSwing() consumes
+			-- _counterAttackPending and resets NextAttackAt safely later.
+			return
+		end
+
 		if Farm.CounterAttackOnHit then
 			-- Keep taking normal damage, but do not enter the damage-retreat/block
 			-- routine. Cancel local reaction tracks and request an immediate swing.
@@ -3383,6 +3408,13 @@ function FarmRetreat:Watch()
 end
 
 function FarmRetreat:BeginCombo(target)
+	-- Dungeon has no retreat at all. Treat the combo retreat request as handled
+	-- so ComboRuntime immediately resumes normal attacking without teleporting.
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		self:Clear()
+		DamageBlock:Release()
+		return true
+	end
 	if not Farm.Enabled or not Farm.RetreatEnabled or Farm._questBusy or Farm._lootBusy or Farm._bettyBusy or Farm._storyBusy or Farm._deliveryBusy or Farm._pagesBusy or Farm._bearBusy then return false end
 	if self.Until > os.clock() then return false end
 	if Farm.InputBlocked and Farm.InputBlocked() then return false end
@@ -3419,6 +3451,12 @@ end
 
 function FarmRetreat:Step()
 	self:Watch()
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		-- Clear any retreat that may have started before Dungeon was enabled.
+		self:Clear()
+		DamageBlock:Release()
+		return false
+	end
 	if not Farm.Enabled or not Farm.RetreatEnabled or self.Until <= os.clock() then self:Clear(); return false end
 	if Farm.InputBlocked and Farm.InputBlocked() then self:Clear(); return false end
 	local char = player.Character
@@ -3642,7 +3680,7 @@ function BossLoot:Step()
 	return true
 end
 
-local function farmRestoreHitbox()
+local function farmRestorePlayerHitbox()
 	for part, original in pairs(Farm._hitboxOriginals) do
 		if part.Parent then
 			pcall(function()
@@ -3650,6 +3688,8 @@ local function farmRestoreHitbox()
 				part.Transparency = original.Transparency
 				part.CanCollide = original.CanCollide
 				part.Massless = original.Massless
+				part.CanTouch = original.CanTouch
+				part.CanQuery = original.CanQuery
 			end)
 		end
 	end
@@ -3658,30 +3698,118 @@ local function farmRestoreHitbox()
 	Farm._hitboxNextAt = 0
 end
 
+local function farmRestoreHitbox()
+	farmRestorePlayerHitbox()
+
+	for part, original in pairs(Farm._mobHitboxOriginals) do
+		if part.Parent then
+			pcall(function()
+				part.Size = original.Size
+				part.Transparency = original.Transparency
+				part.CanCollide = original.CanCollide
+				part.Massless = original.Massless
+				part.CanTouch = original.CanTouch
+				part.CanQuery = original.CanQuery
+			end)
+		end
+	end
+	Farm._mobHitboxOriginals = setmetatable({}, { __mode = "k" })
+	Farm._mobHitboxTarget = nil
+	Farm._mobHitboxNextAt = 0
+end
+
 local function farmExtendHitbox()
 	local char = player.Character
 	local tool = char and char:FindFirstChildOfClass("Tool")
 	if tool ~= Farm._hitboxTool then
-		farmRestoreHitbox()
+		farmRestorePlayerHitbox()
 		Farm._hitboxTool = tool
 	end
 	if not tool or os.clock() < (Farm._hitboxNextAt or 0) then return end
-	Farm._hitboxNextAt = os.clock() + 0.25
-	local size = math.clamp(tonumber(Farm.Hitbox) or 18, 5, 40)
+	Farm._hitboxNextAt = os.clock() + 0.15
+	local size = math.clamp(tonumber(Farm.PlayerAttackHitbox) or 30, 5, 100)
 	for _, d in ipairs(tool:GetDescendants()) do
-		local name = d.Name:lower():gsub("[%s_%-]", "")
-		if d:IsA("BasePart") and (name == "hit" or name:match("^hitbox%d*$") or name == "weaponhitbox" or name == "damagehitbox") then
+		-- Some weapons do not expose a part literally named Hitbox; their
+		-- touch/damage region can be Handle, Blade, MeshPart, etc. Expand every
+		-- BasePart in the equipped Tool so the character's attack volume is larger.
+		if d:IsA("BasePart") then
 			if not Farm._hitboxOriginals[d] then
-				Farm._hitboxOriginals[d] = { Size = d.Size, Transparency = d.Transparency,
-					CanCollide = d.CanCollide, Massless = d.Massless }
+				Farm._hitboxOriginals[d] = {
+					Size = d.Size,
+					Transparency = d.Transparency,
+					CanCollide = d.CanCollide,
+					Massless = d.Massless,
+					CanTouch = d.CanTouch,
+					CanQuery = d.CanQuery,
+				}
 			end
 			pcall(function()
 				d.Size = Vector3.new(size, size, size)
-				d.Transparency = 0.7
+				-- While manually testing from the Player page, keep the enlarged
+				-- weapon volume slightly visible so its actual client-side size is clear.
+				d.Transparency = Farm.PlayerHitboxTest and 0.65 or 1
 				d.CanCollide = false
 				d.Massless = true
+				d.CanTouch = true
+				d.CanQuery = true
 			end)
 		end
+	end
+end
+
+Farm._playerHitboxTestConn = RunService.Heartbeat:Connect(function()
+	if not gui.Parent or _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN then return end
+	if Farm.PlayerHitboxTest then
+		farmExtendHitbox()
+	end
+end)
+
+local function farmExtendMobHitbox(mob)
+	if mob ~= Farm._mobHitboxTarget then
+		for part, original in pairs(Farm._mobHitboxOriginals) do
+			if part.Parent then
+				pcall(function()
+					part.Size = original.Size
+					part.Transparency = original.Transparency
+					part.CanCollide = original.CanCollide
+					part.Massless = original.Massless
+					part.CanTouch = original.CanTouch
+					part.CanQuery = original.CanQuery
+				end)
+			end
+		end
+		Farm._mobHitboxOriginals = setmetatable({}, { __mode = "k" })
+		Farm._mobHitboxTarget = mob
+		Farm._mobHitboxNextAt = 0
+	end
+	if not mob or not mob.Parent or os.clock() < (Farm._mobHitboxNextAt or 0) then return end
+	Farm._mobHitboxNextAt = os.clock() + 0.15
+
+	local size = math.clamp(tonumber(Farm.Hitbox) or 18, 5, 40)
+	local root = mob:FindFirstChild("HumanoidRootPart", true)
+		or mob:FindFirstChild("UpperTorso", true)
+		or mob:FindFirstChild("Torso", true)
+		or (mob:IsA("Model") and mob.PrimaryPart)
+
+	if root and root:IsA("BasePart") then
+		if not Farm._mobHitboxOriginals[root] then
+			Farm._mobHitboxOriginals[root] = {
+				Size = root.Size,
+				Transparency = root.Transparency,
+				CanCollide = root.CanCollide,
+				Massless = root.Massless,
+				CanTouch = root.CanTouch,
+				CanQuery = root.CanQuery,
+			}
+		end
+		pcall(function()
+			root.Size = Vector3.new(size, size, size)
+			root.Transparency = 1
+			root.CanCollide = false
+			root.Massless = true
+			root.CanTouch = true
+			root.CanQuery = true
+		end)
 	end
 end
 
@@ -3696,9 +3824,50 @@ function FarmCharacterState:RememberHumanoid(hum)
 	if self.Humanoids[hum] == nil then self.Humanoids[hum] = hum.AutoRotate end
 end
 
+local function dungeonReleasePreAttack()
+	local dungeon = Farm.Dungeon
+	local held = dungeon and dungeon.PreAttackHeld
+	if not held then return end
+	dungeon.PreAttackHeld = nil
+	pcall(function()
+		held.Input:SendMouseButtonEvent(held.X, held.Y, 0, false, game, 0)
+	end)
+end
+
+local function dungeonHoldPreAttack(mob)
+	local dungeon = Farm.Dungeon
+	if not dungeon or not dungeon.Enabled then return false end
+	if dungeon.PreAttackHeld and dungeon.PreAttackHeld.Target == mob then return true end
+	dungeonReleasePreAttack()
+	local camera = workspace.CurrentCamera
+	if not camera then return false end
+	local held
+	local ok = pcall(function()
+		local vim = game:GetService("VirtualInputManager")
+		held = {
+			Input = vim,
+			X = camera.ViewportSize.X * 0.5,
+			Y = camera.ViewportSize.Y * 0.5,
+			Target = mob,
+		}
+		vim:SendMouseButtonEvent(held.X, held.Y, 0, true, game, 0)
+	end)
+	if not ok or not held then return false end
+	dungeon.PreAttackHeld = held
+	return true
+end
+
 local function farmMoveUnder(mob)
 	if not mob or not mob.Parent then return false end
-	local cf = farmCFrameOf(mob)
+	local cf
+	if Farm.Dungeon and Farm.Dungeon.Enabled and Farm.Dungeon.TargetRoot then
+		-- Dungeon mobs can dodge/dash, so always follow the live HRP instead of
+		-- a model pivot that may lag behind during movement animations.
+		local targetRoot = Farm.Dungeon:TargetRoot(mob)
+		cf = targetRoot and targetRoot.CFrame or nil
+	else
+		cf = farmCFrameOf(mob)
+	end
 	if not cf then return false end
 	local char = player.Character
 	if not char then return false end
@@ -3711,8 +3880,49 @@ local function farmMoveUnder(mob)
 	local minimum = math.min(1, math.max(0.5, hrp.Size.Y * 0.25))
 	local depth = math.clamp(tonumber(Farm.Depth) or 2, minimum, range - 0.5)
 
+	-- Dungeon uses a two-step teleport:
+	-- 1) hover high above the target for a brief moment
+	-- 2) drop to the normal UNDER-target attack position and start swinging.
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		local dungeon = Farm.Dungeon
+		local now = os.clock()
+		local anchor = dungeon.ApproachAnchor
+		local moved = anchor and (targetPosition - anchor).Magnitude
+		local needsApproach = dungeon.ApproachTarget ~= mob
+			or not anchor
+			or (moved and moved >= (tonumber(dungeon.ReapproachDistance) or 10))
+
+		if needsApproach then
+			-- Start a fresh approach. The attack is pressed only AFTER we arrive
+			-- in the sky position, then held until we drop underneath the mob.
+			dungeonReleasePreAttack()
+			dungeon.ApproachTarget = mob
+			dungeon.ApproachAnchor = targetPosition
+			dungeon.ApproachReadyAt = now + math.clamp(tonumber(dungeon.ApproachDelay) or 1.0, 0.1, 3)
+		end
+
+		if now < (dungeon.ApproachReadyAt or 0) then
+			local skyHeight = math.clamp(tonumber(dungeon.ApproachSkyHeight) or 60, 15, 150)
+			local skyPosition = targetPosition + Vector3.new(0, skyHeight, 0)
+			FarmCharacterState:RememberHumanoid(hum)
+			hum.AutoRotate = false
+			hrp.CFrame = CFrame.lookAt(skyPosition, targetPosition, Vector3.new(0, 0, -1))
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.AssemblyAngularVelocity = Vector3.zero
+			-- Once we are actually up in the sky, press M1 and KEEP holding it.
+			dungeonHoldPreAttack(mob)
+			return false
+		end
+
+		-- Refresh the anchor only after the sky-wait stage completed.
+		dungeon.ApproachAnchor = targetPosition
+	end
+
 	local desiredPosition
-	if Farm.BossEnabled and tostring(Farm.BossName):lower() == "yeti demon" then
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		-- After waiting above the mob, drop underneath and attack from below.
+		desiredPosition = targetPosition - Vector3.new(0, depth, 0)
+	elseif Farm.BossEnabled and tostring(Farm.BossName):lower() == "yeti demon" then
 		-- Yeti Demon is very large: fight from behind instead of underneath.
 		local forward = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
 		if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) end
@@ -3730,6 +3940,12 @@ local function farmMoveUnder(mob)
 	hrp.CFrame = CFrame.lookAt(desiredPosition, targetPosition, attackUp)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.AssemblyAngularVelocity = Vector3.zero
+
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		-- We arrived at attack range. Release the M1 that was held before the
+		-- teleport, then let the normal auto-attack loop continue immediately.
+		dungeonReleasePreAttack()
+	end
 	return true
 end
 
@@ -4112,6 +4328,16 @@ function CombatRuntime:CombatReady()
 	local target = Farm._attackTarget
 	if char ~= self.Character or not hum or hum.Health <= 0 or not root
 	or not self:TargetAlive(target) then return false end
+
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		-- Follow a dodging target again in the same tick as the hit check.
+		if not farmMoveUnder(target) then return false end
+		local targetRoot = Farm.Dungeon:TargetRoot(target)
+		if not targetRoot then return false end
+		local distance = (targetRoot.Position - root.Position).Magnitude
+		return distance <= math.max(tonumber(Farm.AttackRange) or 12, 5)
+	end
+
 	local cf = farmCFrameOf(target)
 	return cf ~= nil and (cf.Position - root.Position).Magnitude <= Farm.AttackRange
 end
@@ -4295,6 +4521,11 @@ local function attackSwing()
 		Farm._counterAttackPending = false
 		CombatRuntime.NextAttackAt = 0
 	end
+	-- Dungeon mobs may dodge on the exact frame we arrive. Chase the locked
+	-- HRP again inside the attack loop, then check range and swing immediately.
+	if Farm.Dungeon and Farm.Dungeon.Enabled and Farm._attackTarget then
+		farmMoveUnder(Farm._attackTarget)
+	end
 	if not CombatRuntime:CombatReady() then
 		CombatRuntime:Release()
 		return
@@ -4333,6 +4564,14 @@ local function attackSwing()
 	ComboRuntime:Dispatched(dispatched)
 	CombatRuntime.NextAttackAt = now + math.max(Farm.AttackInterval, 0.025)
 	if dispatched then
+		-- Dungeon Kill Aura may only finish a mob after this normal Auto Attack
+		-- has actually dispatched two attack presses to the same target.
+		if Farm.Dungeon and Farm.Dungeon.Enabled and Farm.Dungeon.KillAura and target then
+			local presses = Farm.Dungeon.KillAuraPrime[target] or 0
+			if presses < 2 then
+				Farm.Dungeon.KillAuraPrime[target] = presses + 1
+			end
+		end
 		CombatRuntime.DriverAttempts += 1
 		CombatRuntime.BasicTurnPending = false
 		CombatRuntime.State = "attacking"
@@ -4374,6 +4613,7 @@ function CombatRuntime:SetTarget(target)
 	farmMultiBossWatchTarget(target)
 	if Farm._target == target then return end
 	self:Release()
+	farmExtendMobHitbox(target)
 	Farm._target, Farm._attackTarget = target, nil
 	self:ResetProgress()
 end
@@ -4455,9 +4695,22 @@ function CombatRuntime:Step()
 	end
 
 	if Farm._target and not self:TargetAlive(Farm._target) then
+		local oldTarget = Farm._target
+		local oldHum = oldTarget and oldTarget:FindFirstChildWhichIsA("Humanoid", true)
+		local confirmedDead = oldTarget == nil or oldTarget.Parent == nil
+			or (oldHum ~= nil and oldHum.Health <= 0)
+
 		self:SetTarget(nil)
 		FarmRetreat:Clear()
 		self.NextScanAt = 0
+
+		if Farm.Dungeon and Farm.Dungeon.Enabled and confirmedDead then
+			Farm.Dungeon:ClearIsolation()
+			Farm.Dungeon.NextTargetAt = os.clock()
+				+ math.clamp(tonumber(Farm.Dungeon.NextTargetDelay) or 0.5, 0.1, 3)
+			self.State = "waiting next dungeon target"
+			return
+		end
 	end
 	if FarmRetreat:Step() then self.State = "retreating"; return end
 	farmTryAutoQuest()
@@ -4468,7 +4721,9 @@ function CombatRuntime:Step()
 		self.State = "quest"
 		return
 	end
-	if not Farm._target and os.clock() >= self.NextScanAt then
+	local dungeonTargetReady = not (Farm.Dungeon and Farm.Dungeon.Enabled)
+		or os.clock() >= (Farm.Dungeon.NextTargetAt or 0)
+	if not Farm._target and dungeonTargetReady and os.clock() >= self.NextScanAt then
 		self.NextScanAt = os.clock() + 0.25
 		if Farm.MultiBossEnabled and not farmFindBossByName(Farm.BossName) then
 			-- An absent first boss must not block another selected, living boss.
@@ -4492,10 +4747,30 @@ function CombatRuntime:Step()
 	local target = Farm._target
 	if not self:TargetAlive(target) then
 		Farm._attackTarget = nil
-		self.State = "waiting"
-		return
+		if Farm.Dungeon and Farm.Dungeon.Enabled then
+			if os.clock() < (Farm.Dungeon.NextTargetAt or 0) then
+				self:Release()
+				self.State = "waiting next dungeon target"
+				return
+			end
+			Farm.Dungeon:ClearIsolation()
+			self:SetTarget(Farm.Dungeon:FindTarget())
+			target = Farm._target
+			if self:TargetAlive(target) then
+				self.NextScanAt = 0
+			else
+				self.State = "waiting"
+				return
+			end
+		else
+			self.State = "waiting"
+			return
+		end
 	end
+	-- Dungeon approaches in two steps: underground below the live HRP first,
+	-- then moves to attack range. A large dodge triggers that approach again.
 	farmExtendHitbox()
+	farmExtendMobHitbox(target)
 	if farmMoveUnder(target) then
 		Farm._attackTarget = target
 	else
@@ -7626,48 +7901,94 @@ gui.Destroying:Connect(function()
 end)
 
 -- Dungeon combat shares the normal attack and retreat loops.
-Farm.Dungeon = { Enabled = false, Radius = 300 }
+Farm.Dungeon = {
+	Enabled = false,
+	Radius = 300,
+	KillAura = false,
+	KillAuraRadius = 20,
+	KillAuraNextAt = 0,
+	KillAuraPrime = setmetatable({}, { __mode = "k" }),
+	KillAuraBurst = setmetatable({}, { __mode = "k" }),
+	-- Auto Dungeon now fights every NPC at its real server position.
+	-- Keep the old isolation fields only for cleanup/backward compatibility.
+	LiftLockedTarget = false,
+	IsolationHeight = 25,
+	IsolationTarget = nil,
+	IsolationPosition = nil,
+	IsolationOriginalCFrame = nil,
+	IsolationStartedAt = 0,
+	IsolationLastHealth = nil,
+	IsolationLastHealthAt = 0,
+	IsolationRetries = 0,
+	IsolationFallback = false,
+	IsolationActivated = false,
+	IsolationActivationHealth = nil,
+	IsolationLiftHealth = nil,
+	IsolationLiftAt = 0,
+	IsolationStallDelay = 1.0,
+	IsolationNoLift = setmetatable({}, { __mode = "k" }),
+	-- Two-step dungeon approach: wait high above the target, then drop below to hit.
+	ApproachTarget = nil,
+	ApproachReadyAt = 0,
+	ApproachAnchor = nil,
+	ApproachDelay = 1.0,
+	ApproachSkyHeight = 60,
+	ReapproachDistance = 10,
+	PreAttackHeld = nil,
+	-- Small pause after a mob is confirmed dead before selecting the next one.
+	NextTargetDelay = 0.5,
+	NextTargetAt = 0,
+}
 
-function Farm.Dungeon:ActiveFolder()
+function Farm.Dungeon:TemporaryFolder()
 	local humanoids = workspace:FindFirstChild("Humanoids")
 	local regions = humanoids and humanoids:FindFirstChild("Regions")
-	local temporary = regions and regions:FindFirstChild("Temporary")
+	return regions and regions:FindFirstChild("Temporary")
+end
+
+function Farm.Dungeon:ActiveFolder()
+	local temporary = self:TemporaryFolder()
 	return temporary and temporary:FindFirstChild("ActiveNpcs")
+end
+
+function Farm.Dungeon:TargetRoot(model)
+	if not model then return nil end
+	local root = model:FindFirstChild("HumanoidRootPart")
+		or model:FindFirstChild("HumanoidRootPart", true)
+	return root and root:IsA("BasePart") and root or nil
 end
 
 function Farm.Dungeon:ValidTarget(model)
 	if not model or not model.Parent then return false end
 	if game:GetService("Players"):GetPlayerFromCharacter(model) then return false end
-	local active = self:ActiveFolder()
-	if not active or not model:IsDescendantOf(active) then return false end
+	local myCharacter = player.Character
+	if myCharacter and (model == myCharacter or model:IsDescendantOf(myCharacter)) then return false end
 	local hum = model:FindFirstChildWhichIsA("Humanoid", true)
-	local root = model:FindFirstChild("HumanoidRootPart")
-		or model:FindFirstChild("HumanoidRootPart", true)
-	return hum ~= nil and hum.Health > 0 and root ~= nil and root:IsA("BasePart")
+	local root = self:TargetRoot(model)
+	return hum ~= nil and hum.Health > 0 and root ~= nil
 end
 
 function Farm.Dungeon:FindTarget()
-	local folder = self:ActiveFolder()
-	if not folder then return nil end
-	local charRoot = self.Character and self.Character:FindFirstChild("HumanoidRootPart")
+	local char = player.Character
+	local charRoot = char and char:FindFirstChild("HumanoidRootPart")
 	if not charRoot then return nil end
 
-	local best, distance = nil, math.huge
+	-- Dungeon rule: attack EVERY living model that has HumanoidRootPart
+	-- within 300 studs of the player. No NPC-folder/name filtering.
+	local radius = math.max(1, tonumber(self.Radius) or 300)
+	local best, bestDistance = nil, math.huge
 	local seen = {}
-	for _, hum in ipairs(folder:GetDescendants()) do
-		if hum:IsA("Humanoid") and hum.Health > 0 then
-			local model = hum.Parent
-			while model and model ~= folder and not model:IsA("Model") do
-				model = model.Parent
-			end
-			if model and model ~= folder and not seen[model] and self:ValidTarget(model) then
-				local targetRoot = model:FindFirstChild("HumanoidRootPart")
-					or model:FindFirstChild("HumanoidRootPart", true)
-				if targetRoot then
+
+	for _, part in ipairs(workspace:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name == "HumanoidRootPart" then
+			local d = (part.Position - charRoot.Position).Magnitude
+			if d <= radius then
+				local model = part:FindFirstAncestorOfClass("Model")
+				if model and not seen[model] then
 					seen[model] = true
-					local d = (targetRoot.Position - charRoot.Position).Magnitude
-					if d < distance then
-						best, distance = model, d
+					if self:ValidTarget(model) and d < bestDistance then
+						best = model
+						bestDistance = d
 					end
 				end
 			end
@@ -7676,9 +7997,184 @@ function Farm.Dungeon:FindTarget()
 	return best
 end
 
+function Farm.Dungeon:ClearIsolation()
+	-- Never leave a living dungeon NPC stranded in the client-side lift
+	-- position when the lock changes. Put it back where it was first found.
+	local oldTarget = self.IsolationTarget
+	local original = self.IsolationOriginalCFrame
+	if oldTarget and original and oldTarget.Parent then
+		local oldHum = oldTarget:FindFirstChildWhichIsA("Humanoid", true)
+		local oldRoot = oldTarget:FindFirstChild("HumanoidRootPart")
+			or oldTarget:FindFirstChild("HumanoidRootPart", true)
+		if oldRoot and (not oldHum or oldHum.Health > 0) then
+			pcall(function()
+				if oldTarget:IsA("Model") then oldTarget:PivotTo(original) end
+				oldRoot.CFrame = original
+				oldRoot.AssemblyLinearVelocity = Vector3.zero
+				oldRoot.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+	end
+
+	self.IsolationTarget = nil
+	self.IsolationPosition = nil
+	self.IsolationOriginalCFrame = nil
+	self.IsolationStartedAt = 0
+	self.IsolationLastHealth = nil
+	self.IsolationLastHealthAt = 0
+	self.IsolationRetries = 0
+	self.IsolationFallback = false
+	self.IsolationActivated = false
+	self.IsolationActivationHealth = nil
+	self.IsolationLiftHealth = nil
+	self.IsolationLiftAt = 0
+	dungeonReleasePreAttack()
+	self.ApproachTarget = nil
+	self.ApproachReadyAt = 0
+	self.ApproachAnchor = nil
+end
+
+function Farm.Dungeon:PrepareTarget(target)
+	if not self.Enabled or not self.LiftLockedTarget or not self:ValidTarget(target) then
+		if self.IsolationTarget == target or not target then self:ClearIsolation() end
+		return false
+	end
+
+	local targetRoot = target:FindFirstChild("HumanoidRootPart")
+		or target:FindFirstChild("HumanoidRootPart", true)
+	local targetHum = target:FindFirstChildWhichIsA("Humanoid", true)
+	if not targetRoot or not targetHum or targetHum.Health <= 0 then
+		self:ClearIsolation()
+		return false
+	end
+
+	local now = os.clock()
+	if self.IsolationTarget ~= target then
+		self:ClearIsolation()
+		self.IsolationTarget = target
+		self.IsolationOriginalCFrame = targetRoot.CFrame
+		self.IsolationPosition = nil
+		self.IsolationStartedAt = now
+		self.IsolationLastHealth = targetHum.Health
+		self.IsolationLastHealthAt = now
+		self.IsolationActivated = false
+		self.IsolationActivationHealth = targetHum.Health
+		self.IsolationLiftHealth = nil
+		self.IsolationLiftAt = 0
+
+		pcall(function()
+			if setsimulationradius then
+				setsimulationradius(math.huge, math.huge)
+			elseif sethiddenproperty then
+				sethiddenproperty(player, "SimulationRadius", math.huge)
+			end
+		end)
+
+		-- If this exact NPC already proved that server-side hits stop while
+		-- lifted, keep it at its real position for the rest of its lifetime.
+		if self.IsolationNoLift[target] then
+			self.IsolationActivated = true
+			self.IsolationFallback = true
+			return true
+		end
+	end
+
+	-- Do not lift a fresh NPC yet. First stay at its real server position
+	-- and let normal Auto Attack land at least one real hit.
+	if not self.IsolationActivated then
+		local activationHealth = self.IsolationActivationHealth or targetHum.Health
+		if targetHum.Health < activationHealth then
+			self.IsolationActivated = true
+			self.IsolationLastHealth = targetHum.Health
+			self.IsolationLastHealthAt = now
+			self.IsolationLiftHealth = targetHum.Health
+			self.IsolationLiftAt = now
+			self.IsolationPosition = targetRoot.Position + Vector3.new(0, tonumber(self.IsolationHeight) or 25, 0)
+			self.IsolationRetries = 0
+			self.IsolationFallback = false
+		else
+			-- Keep the client NPC copy at the original location until the first
+			-- server-confirmed hit happens, so farmMoveUnder() warps us to it.
+			local original = self.IsolationOriginalCFrame
+			if original then
+				pcall(function()
+					if target:IsA("Model") then target:PivotTo(original) end
+					targetRoot.CFrame = original
+					targetRoot.AssemblyLinearVelocity = Vector3.zero
+					targetRoot.AssemblyAngularVelocity = Vector3.zero
+				end)
+			end
+			return false
+		end
+	end
+
+	if self.IsolationLastHealth == nil or targetHum.Health < self.IsolationLastHealth then
+		self.IsolationLastHealth = targetHum.Health
+		self.IsolationLastHealthAt = now
+		self.IsolationLiftHealth = targetHum.Health
+		self.IsolationLiftAt = now
+		if not self.IsolationFallback then self.IsolationRetries = 0 end
+	end
+
+	-- A lifted NPC can still be server-owned. In that case the client shows it
+	-- in the air while the server keeps the real hit target on the ground.
+	-- Detect that quickly: if HP stops changing after the lift, stop lifting this
+	-- NPC, restore its real position, and keep attacking there instead of swinging
+	-- at a client-only position.
+	local stallDelay = math.clamp(tonumber(self.IsolationStallDelay) or 1.0, 0.6, 2.0)
+	if self.IsolationActivated and not self.IsolationFallback
+		and now - (self.IsolationLastHealthAt or now) >= stallDelay then
+		self.IsolationRetries = (self.IsolationRetries or 0) + 1
+		self.IsolationFallback = true
+		self.IsolationNoLift[target] = true
+		CombatRuntime.NextScanAt = 0
+		CombatRuntime.NextAttackAt = 0
+		Farm._attackTarget = nil
+	end
+
+	-- Some of the final dungeon NPCs are server-owned and cannot stay lifted.
+	-- For those, return the client copy to the saved real position so movement
+	-- and Kill Aura operate where the server still considers the NPC to be.
+	if self.IsolationFallback and self.IsolationOriginalCFrame then
+		local original = self.IsolationOriginalCFrame
+		pcall(function()
+			if target:IsA("Model") then target:PivotTo(original) end
+			targetRoot.CFrame = original
+			targetRoot.AssemblyLinearVelocity = Vector3.zero
+			targetRoot.AssemblyAngularVelocity = Vector3.zero
+		end)
+		return true
+	end
+
+	local position = self.IsolationPosition
+	if not position then return false end
+	local look = Vector3.new(targetRoot.CFrame.LookVector.X, 0, targetRoot.CFrame.LookVector.Z)
+	if look.Magnitude < 0.01 then look = Vector3.new(0, 0, -1) else look = look.Unit end
+	local desired = CFrame.lookAt(position, position + look)
+
+	-- Keep forcing the selected NPC upward while it is the active target.
+	pcall(function()
+		if target:IsA("Model") then target:PivotTo(desired) end
+	end)
+	pcall(function()
+		targetRoot.CFrame = desired
+		targetRoot.AssemblyLinearVelocity = Vector3.zero
+		targetRoot.AssemblyAngularVelocity = Vector3.zero
+		for _, part in ipairs(target:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.AssemblyLinearVelocity = Vector3.zero
+				part.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	end)
+
+	return true
+end
+
 Farm.StopDungeonCombat = function()
 	local mode = Farm.Dungeon
 	if not mode.Enabled then return end
+	mode:ClearIsolation()
 	mode.Enabled = false
 	if mode.Saved then
 		Farm.BossEnabled, Farm.AutoQuest, Farm.AutoAttack = mode.Saved.BossEnabled, mode.Saved.AutoQuest, mode.Saved.AutoAttack
@@ -7702,6 +8198,12 @@ function Farm.Dungeon:SetEnabled(on)
 	self.Saved = { BossEnabled = Farm.BossEnabled, AutoQuest = Farm.AutoQuest, AutoAttack = Farm.AutoAttack }
 	Farm.BossEnabled, Farm.AutoQuest, Farm.AutoAttack = false, false, true
 	self.Character = char
+	self.LiftLockedTarget = false
+	self.NextTargetAt = 0
+	self:ClearIsolation()
+	-- Dungeon never uses the global damage/combo retreat movement.
+	FarmRetreat:Stop()
+	DamageBlock:Release()
 	farmSet(true, true)
 	self.Enabled = true
 end
@@ -7729,9 +8231,116 @@ function Farm.Dungeon:StepAutoSkip()
 	end
 end
 Farm.Dungeon.SkipConnection = RunService.Heartbeat:Connect(function() Farm.Dungeon:StepAutoSkip() end)
+
+function Farm.Dungeon:FindKillAuraTargets()
+	local folder = self:ActiveFolder()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not folder or not root then return {} end
+
+	local targets = {}
+	local radius = tonumber(self.KillAuraRadius) or 20
+	for _, hum in ipairs(folder:GetDescendants()) do
+		if hum:IsA("Humanoid") and hum.Health > 0 then
+			local model = hum.Parent
+			while model and model ~= folder and not model:IsA("Model") do
+				model = model.Parent
+			end
+			if model and model ~= folder and self:ValidTarget(model) then
+				local targetRoot = model:FindFirstChild("HumanoidRootPart")
+					or model:FindFirstChild("HumanoidRootPart", true)
+				if targetRoot and (targetRoot.Position - root.Position).Magnitude <= radius then
+					table.insert(targets, { Model = model, Humanoid = hum })
+				end
+			end
+		end
+	end
+	return targets
+end
+
+function Farm.Dungeon:StepKillAura()
+	if not self.KillAura or not gui.Parent or _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN then return end
+	local now = os.clock()
+	if now < (self.KillAuraNextAt or 0) then return end
+
+	local char = player.Character
+	local myHum = char and char:FindFirstChildOfClass("Humanoid")
+	if not char or not myHum or myHum.Health <= 0 then return end
+
+	-- Aura follows the exact dungeon target so another nearby NPC cannot steal it.
+	local locked = self.IsolationTarget or Farm._target
+	if not locked or not self:ValidTarget(locked) then return end
+	-- Fresh NPCs must receive one real Auto Attack hit at their server position
+	-- before Aura/lifting starts.
+	if self.IsolationTarget == locked and not self.IsolationActivated then return end
+
+	local targetRoot = locked:FindFirstChild("HumanoidRootPart")
+		or locked:FindFirstChild("HumanoidRootPart", true)
+	local targetHum = locked:FindFirstChildWhichIsA("Humanoid", true)
+	local myRoot = char:FindFirstChild("HumanoidRootPart")
+	if not targetRoot or not targetHum or targetHum.Health <= 0 or not myRoot then return end
+	if (targetRoot.Position - myRoot.Position).Magnitude > (tonumber(self.KillAuraRadius) or 20) then return end
+
+	-- Kill Aura is locked until the normal Auto Attack has pressed attack
+	-- on this exact mob two times. Aura no longer primes those hits itself.
+	local presses = self.KillAuraPrime[locked] or 0
+	if presses < 2 then
+		self.KillAuraNextAt = now + 0.05
+		return
+	end
+
+	local _, ready = farmEquipSelectedWeapon(char, myHum)
+	if not ready then
+		self.KillAuraNextAt = now + 0.08
+		return
+	end
+
+	local ev = farmGetSignal()
+	if not ev then
+		self.KillAuraNextAt = now + 0.25
+		return
+	end
+
+	-- Do NOT force Humanoid.Health = 0 locally. That made ValidTarget() think the
+	-- mob was dead before the server accepted the damage, so Aura stopped early.
+	-- After the two normal attacks, keep sending server combat pulses until the
+	-- replicated Humanoid health actually reaches zero.
+	self.KillAuraNextAt = now + 0.05
+	local burst = (self.KillAuraBurst[locked] or 0) + 1
+	self.KillAuraBurst[locked] = burst
+
+	pcall(function()
+		ev:FireServer("Combat_Service", "Combat", 1, false, 0.13, false, nil)
+	end)
+
+	-- A second pulse with a tiny gap is more reliable than six calls in one frame
+	-- on servers that debounce Combat_Service.
+	task.delay(0.025, function()
+		if not self.KillAura or not self.Enabled then return end
+		if Farm._target ~= locked or not locked.Parent then return end
+		local hum = locked:FindFirstChildWhichIsA("Humanoid", true)
+		if not hum or hum.Health <= 0 then return end
+		local signal = farmGetSignal()
+		if signal then
+			pcall(function()
+				signal:FireServer("Combat_Service", "Combat", 1, false, 0.13, false, nil)
+			end)
+		end
+	end)
+end
+
+Farm.Dungeon.KillAuraConnection = RunService.Heartbeat:Connect(function()
+	Farm.Dungeon:StepKillAura()
+end)
+
 gui.Destroying:Connect(function()
+	Farm.PlayerHitboxTest = false
+	if Farm._playerHitboxTestConn then Farm._playerHitboxTestConn:Disconnect() end
+	farmRestorePlayerHitbox()
 	Farm.Dungeon.AutoSkip = false
+	Farm.Dungeon.KillAura = false
 	Farm.Dungeon.SkipConnection:Disconnect()
+	Farm.Dungeon.KillAuraConnection:Disconnect()
 end)
 
 local function BuildStatusPage(L, R)
@@ -7779,16 +8388,41 @@ local function BuildStatusPage(L, R)
 end
 
 local function BuildQuestPage(L, R)
-	local _, _, dungeonCombatSetter = Section(R, "Auto Dungeon • Temporary ActiveNpcs", false, function(on)
+	local _, _, dungeonCombatSetter = Section(R, "Auto Dungeon • HumanoidRootPart 300 studs", false, function(on)
 		Farm.Dungeon:SetEnabled(on)
 	end)
 	Farm.Dungeon.Setter = dungeonCombatSetter
-	local combatNote = label(R, "ตรวจทุก Humanoid ใน Temporary.ActiveNpcs เช่น Zuko / High Demon / Grove Raider แล้ววาปไปตีอัตโนมัติ", 11, T.Sub,
-		Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 52))
+	label(R, "Hitbox การตีผู้เล่น", 12, T.Gold, Enum.Font.GothamBold,
+		nil, UDim2.new(1, 0, 0, 22))
+	Slider(R, "Hitbox การตีผู้เล่น", "ขยายพื้นที่ตีของอาวุธฝั่งผู้เล่น • ปรับได้ 5-100", 5, 100, Farm.PlayerAttackHitbox, " st", function(val)
+		Farm.PlayerAttackHitbox = math.floor(val + 0.5)
+		Farm._hitboxNextAt = 0
+	end)
+	local combatNote = label(R, "หา HumanoidRootPart ระยะ 300 → วาปขึ้นฟ้า → กด M1 ค้างบนฟ้า → รอ → วาปลงมาตีใต้มอนแล้วปล่อย M1", 11, T.Sub,
+		Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 64))
 	combatNote.TextWrapped = true
+	Slider(R, "ความสูงก่อนวาปลงตี", "ระยะลอยเหนือ HumanoidRootPart ก่อนลงมาตีใต้มอน", 20, 120, Farm.Dungeon.ApproachSkyHeight, " st", function(val)
+		Farm.Dungeon.ApproachSkyHeight = math.floor(val + 0.5)
+	end)
+	Slider(R, "เวลาลอยบนฟ้า", "รอก่อนวาปลงมาตีใต้มอน", 0.1, 3, Farm.Dungeon.ApproachDelay, " s", function(val)
+		Farm.Dungeon.ApproachDelay = math.floor(val * 20 + 0.5) / 20
+	end)
+	Slider(R, "หน่วงก่อนตีตัวถัดไป", "หลังมอนตาย รอก่อนเลือกเป้าตัวใหม่", 0.1, 2, Farm.Dungeon.NextTargetDelay, " s", function(val)
+		Farm.Dungeon.NextTargetDelay = math.floor(val * 10 + 0.5) / 10
+	end)
 	Toggle(R, "Auto Skip", false, function(on)
 		Farm.Dungeon.AutoSkip = on
 		Farm.Dungeon.NextSkipAt = 0
+	end)
+	Toggle(R, "Kill Aura", false, function(on)
+		Farm.Dungeon.KillAura = on
+		Farm.Dungeon.KillAuraNextAt = 0
+		Farm.Dungeon.KillAuraPrime = setmetatable({}, { __mode = "k" })
+		Farm.Dungeon.KillAuraBurst = setmetatable({}, { __mode = "k" })
+		if not on then CombatRuntime:ReleaseAttack() end
+	end)
+	Slider(R, "Kill Aura Range", "Auto Attack ต้องกดตีมอนตัวนั้น 2 ครั้งก่อน แล้ว Kill Aura ค่อยฆ่า", 5, 60, Farm.Dungeon.KillAuraRadius, " st", function(val)
+		Farm.Dungeon.KillAuraRadius = math.floor(val + 0.5)
 	end)
 	local _, _, dungeonSetter = Section(R, "Quest unlock Dungeon • Lv65+", false, function(on)
 		DungeonQuest:SetEnabled(on)
@@ -8022,8 +8656,12 @@ local function BuildFarmPage(L, R)
 			10, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 58)).TextWrapped = true
 
 		MobileUI:TagMenuItems(R, "Raids")
-		Slider(R, "Hitbox Size", "ขนาด hitbox", 5, 40, Farm.Hitbox, " st", function(val)
+		Slider(R, "Mob Hitbox Size", "ขนาด hitbox ของมอนที่ล็อก", 5, 40, Farm.Hitbox, " st", function(val)
 			Farm.Hitbox = val
+		end)
+		Slider(R, "Player Attack Hitbox", "ขยายพื้นที่ตีของ BasePart ทุกชิ้นในอาวุธที่ถืออยู่", 5, 100, Farm.PlayerAttackHitbox, " st", function(val)
+			Farm.PlayerAttackHitbox = val
+			Farm._hitboxNextAt = 0
 		end)
 		Slider(R, "ระยะโจมตี", "ระยะเริ่มตี • เซิร์ฟเวอร์เป็นผู้ตรวจว่าตีโดน", 5, 25, Farm.AttackRange, " st", function(val)
 			Farm.AttackRange = val
@@ -8431,6 +9069,23 @@ for i, v in ipairs(navItems) do
 		Slider(L, "Fly Speed", "WASD • Space ขึ้น • Ctrl ลง", 20, 500, PlayerMods.FlySpeed, "", function(val)
 			PlayerMods.FlySpeed = math.floor(val + 0.5)
 		end)
+
+		Section(R, "ทดสอบระยะตี", true)
+		Toggle(R, "ทดสอบ Hitbox การตี", Farm.PlayerHitboxTest, function(on)
+			Farm.PlayerHitboxTest = on
+			Farm._hitboxNextAt = 0
+			if not on and not Farm.Enabled then farmRestorePlayerHitbox() end
+			playerStatus.Text = on
+				and "เปิดทดสอบ Hitbox • ถืออาวุธแล้วลองตีมอนด้วยตัวเอง"
+				or "ปิดทดสอบ Hitbox • คืนขนาดอาวุธเดิม"
+			playerStatus.TextColor3 = on and T.Gold or T.Sub
+		end)
+		Slider(R, "ระยะ Hitbox การตี", "เปิดโหมดทดสอบ แล้วถืออาวุธลองตีเอง • 5-100 studs", 5, 100, Farm.PlayerAttackHitbox, " st", function(val)
+			Farm.PlayerAttackHitbox = math.floor(val + 0.5)
+			Farm._hitboxNextAt = 0
+		end)
+		label(R, "Hitbox ที่ขยายจะเห็นเป็นชิ้นอาวุธโปร่งใส • ถ้าตีไกลแล้วยังไม่โดน แปลว่าเซิร์ฟเวอร์ตรวจระยะเอง",
+			10, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 42)).TextWrapped = true
 
 		Section(R, "การชน", true)
 		Toggle(R, "No Clip", false, function(on)
