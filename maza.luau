@@ -1841,6 +1841,7 @@ local TP = {
 		["Tom"]        = { "Debree", "Regions", "Bamboo Grove", "StationaryNpcs" },
 		["Chaka"]      = { "Debree", "Regions", "Bamboo Grove", "StationaryNpcs" },
 		["Wagwan"]     = { "Debree", "Regions", "Bamboo Grove", "StationaryNpcs" },
+		["Demon Slayer Mitsu"] = { "Debree", "Regions", "Iceveil Valley", "StationaryNpcs" },
 	},
 	NPCs = {
 		"Kazu", "Kona", "Krue", "Lucy", "MoldySugar", "Noote", "Raze", "Rika",
@@ -2318,7 +2319,7 @@ pcall(function()
 end)
 
 local FARM_PATH  = { "Humanoids", "Regions", "Windy Peak", "ActiveNpcs" }
-local FARM_TYPES = { "Bandit", "Civilian", "Bear Cub", "Kaiden Subordinate", "Hoyuzo Subordinate", "Beast Born Demon" }
+local FARM_TYPES = { "Bandit", "Civilian", "Bear Cub", "Kaiden Subordinate", "Hoyuzo Subordinate", "Beast Born Demon", "Fire Profound Demon" }
 local BOSS_QUEST_SPECS = {
 	Zuko = {
 		Text = "Ill take the bandit boss(Lv 7)",
@@ -2395,6 +2396,12 @@ local function farmActiveFolderForName(name)
 		local regions = humanoids and humanoids:FindFirstChild("Regions")
 		local harbor = regions and regions:FindFirstChild("Mistfall Harbor")
 		return harbor and harbor:FindFirstChild("ActiveNpcs")
+	end
+	if wanted == "fire profound demon" then
+		local humanoids = workspace:FindFirstChild("Humanoids")
+		local regions = humanoids and humanoids:FindFirstChild("Regions")
+		local iceveil = regions and regions:FindFirstChild("Iceveil Valley")
+		return iceveil and iceveil:FindFirstChild("ActiveNpcs")
 	end
 	local raidPoint = tonumber(wanted:match("^raid box point (%d+)$"))
 	if raidPoint and RAID_BOX_POINTS[raidPoint] then
@@ -2839,6 +2846,43 @@ local function farmGetSignal()
 	return nil
 end
 
+local MITSU_LV115_QUEST = "Ill put out the blaze(Lv 115)"
+
+local function farmAcceptMitsuLv115Quest()
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local ev = farmGetSignal()
+	if not char or not hum or hum.Health <= 0 or not root then
+		return false, "ตัวละครยังไม่พร้อม"
+	end
+	if not ev then return false, "ไม่พบ SignalEvent" end
+
+	local npc = tpFindNPC("Demon Slayer Mitsu")
+	local npcCf = farmCFrameOf(npc) or TP.Destination("Demon Slayer Mitsu")
+	if not npcCf then return false, "ไม่พบ Demon Slayer Mitsu" end
+
+	local stand = npcCf * CFrame.new(0, 0, -3)
+	root.CFrame = CFrame.lookAt(stand.Position, npcCf.Position)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	task.wait(0.30)
+
+	pcall(function() ev:FireServer("NpcTalking", "Ended") end)
+	task.wait(0.12)
+	local ok, err = pcall(function()
+		ev:FireServer("AddQuest", MITSU_LV115_QUEST)
+	end)
+	if not ok then return false, tostring(err) end
+	task.wait(0.12)
+	pcall(function() ev:FireServer("NpcTalking", "Ended") end)
+
+	Farm._acceptedQuestText = MITSU_LV115_QUEST
+	Farm._questNeeded = false
+	Farm._lastQuestAt = os.clock()
+	return true
+end
+
 local function farmCurrentQuestSpec()
 	if Farm.MultiBossEnabled then return nil end
 	if Farm.BossEnabled then
@@ -2885,6 +2929,15 @@ local function farmCurrentQuestSpec()
 			TargetName = "Beast Born Demon",
 			NPCName = "Rin",
 			ExactGroupSize = 3,
+		}
+	end
+	if type(Farm.MobName) == "string" and Farm.MobName:lower() == "fire profound demon" then
+		return {
+			Text = MITSU_LV115_QUEST,
+			TargetName = "Fire Profound Demon",
+			NPCName = "Demon Slayer Mitsu",
+			RequiredKills = 8,
+			ExactGroupSize = 8,
 		}
 	end
 	return nil
@@ -3079,8 +3132,9 @@ function QuestRuntime:ConfirmDeath(record, diedSignal)
 	self.ProgressAt = os.clock()
 	self.LastDeathAt = self.ProgressAt
 	Farm.QuestKills += 1
-	print("[Mazxhub Quest] " .. tostring(quest.TargetName) .. " " .. Farm.QuestKills .. "/" .. quest.RequiredKills)
-	if Farm.QuestKills >= quest.RequiredKills then
+	local requiredKills = tonumber(quest.RequiredKills)
+	print("[Mazxhub Quest] " .. tostring(quest.TargetName) .. " " .. Farm.QuestKills .. "/" .. tostring(requiredKills or "?"))
+	if requiredKills and Farm.QuestKills >= requiredKills then
 		-- Required confirmed kills completed: immediately return to the same
 		-- quest giver, then let the normal auto-quest flow accept the next round.
 		local completedText = quest.Text
@@ -8986,6 +9040,20 @@ local function BuildFarmPage(L, R)
 				changingFarmMode = false
 
 				Farm.BossEnabled = false
+
+				-- Fire Profound Demon must take Mitsu's Lv115 quest first.
+				if type(Farm.MobName) == "string" and Farm.MobName:lower() == "fire profound demon" then
+					statusLbl.Text = "กำลังไปรับเควส Mitsu Lv115..."
+					statusLbl.TextColor3 = T.Gold
+					local accepted, questErr = farmAcceptMitsuLv115Quest()
+					if not accepted then
+						statusLbl.Text = "รับเควส Mitsu ไม่สำเร็จ: " .. tostring(questErr)
+						statusLbl.TextColor3 = T.Danger
+						if setNormalFarmToggle then setNormalFarmToggle(false, false) end
+						return
+					end
+				end
+
 				local cnt = #farmFindMobsByName(Farm.MobName)
 				farmSet(true)
 				statusLbl.Text = string.format("ฟาร์ม %s (%d ตัว)", Farm.MobName, cnt)
@@ -9052,6 +9120,17 @@ local function BuildFarmPage(L, R)
 		Toggle(L, "Auto รับเควส", false, function(on)
 			Farm.AutoQuest = on
 			farmResetQuest("auto quest toggle")
+		end)
+
+		Button(L, "⟶ รับเควส Mitsu Lv115", T.Card, function()
+			local ok, err = farmAcceptMitsuLv115Quest()
+			if ok then
+				statusLbl.Text = "รับเควส Mitsu • Ill put out the blaze(Lv 115) แล้ว"
+				statusLbl.TextColor3 = T.Mint
+			else
+				statusLbl.Text = "รับเควส Mitsu ไม่สำเร็จ: " .. tostring(err)
+				statusLbl.TextColor3 = T.Danger
+			end
 		end)
 
 		MobileUI:TagMenuItems(L, "Shared")
