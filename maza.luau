@@ -212,6 +212,9 @@ for _, entry in ipairs({
 	{"เลือกบอส", "Select boss"}, {"เลือกเป้าหมายก่อนเปิดฟาร์มบอส", "Choose a target before farming"},
 	{"โจมตีอัตโนมัติ", "Auto attack"}, {"เริ่มและหยุดพร้อมสวิตช์ฟาร์ม", "Starts and stops with farming"},
 	{"ความเร็วโจมตี", "Attack interval"}, {"ไม่รบกวนเมนูและช่องพิมพ์", "Pauses while using menus or typing"},
+	{"ตีถี่", "Fast Attack"}, {"ซ่อนท่าโจมตีพื้นฐาน", "No Swing Animation"},
+	{"ความสูงเหนือหัวมอน", "Height Above Head"},
+	{"อยู่เหนือหัวมอนแล้วตีลงมา ไม่วาปหนี", "Stay above the target's head and attack without retreating"},
 	{"เควส", "Quest"}, {"กำลังไปหา Krue...", "Going to Krue..."},
 	{"หา Krue หรือ SignalEvent ไม่เจอ", "Krue or SignalEvent not found"},
 	{"⟶ วาปหา Krue + เควส Bandit", "⟶ Krue + Bandit quest"},
@@ -964,9 +967,18 @@ local function Dropdown(parent, title, desc, options, default, cb)
 	pad(menu, 4)
 
 	local open = false
+	local closeMenu
 	local function setOpen(state)
+		if state and MobileUI.ActiveDropdownClose and MobileUI.ActiveDropdownClose ~= closeMenu then
+			MobileUI.ActiveDropdownClose()
+		end
 		open = state
-		if open then menu.Visible = true end
+		if open then
+			MobileUI.ActiveDropdownClose = closeMenu
+			menu.Visible = true
+		elseif MobileUI.ActiveDropdownClose == closeMenu then
+			MobileUI.ActiveDropdownClose = nil
+		end
 		local h = math.min(#options, MAX_VISIBLE) * ITEM_H + 8
 		tween(menu,  {Size = UDim2.new(1, 0, 0, open and h or 0)})
 		tween(f,     {Size = UDim2.new(1, 0, 0, open and (BASE + h + 6) or BASE)})
@@ -1010,7 +1022,13 @@ local function Dropdown(parent, title, desc, options, default, cb)
 
 	setOptions(options, default)
 
+	closeMenu = function()
+		if open then setOpen(false) end
+	end
 	btn.Activated:Connect(function() setOpen(not open) end)
+	f:GetPropertyChangedSignal("Visible"):Connect(function()
+		if not f.Visible then closeMenu() end
+	end)
 	return f, function() return selectedOption end, setOptions
 end
 
@@ -2050,6 +2068,49 @@ local function BuildPlayerTeleportPanel(parent, statusLbl)
 		end
 	end)
 
+	local function bringPlayer(name)
+		local targetPlayer = Players:FindFirstChild(name)
+		if not targetPlayer or targetPlayer == player then return false, "ไม่พบผู้เล่น" end
+		local myChar = player.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		local targetChar = targetPlayer.Character
+		local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+		local targetHum = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+		if not myRoot then return false, "ตัวละครของเรายังไม่พร้อม" end
+		if not targetChar or not targetRoot or not targetHum or targetHum.Health <= 0 then
+			return false, "ตัวละครผู้เล่นยังไม่พร้อม"
+		end
+		local destination = myRoot.CFrame * CFrame.new(0, 0, -4)
+		for _ = 1, 4 do
+			if not targetChar.Parent or not targetRoot.Parent then break end
+			pcall(function() targetChar:PivotTo(destination) end)
+			pcall(function()
+				targetRoot.CFrame = destination
+				targetRoot.AssemblyLinearVelocity = Vector3.zero
+				targetRoot.AssemblyAngularVelocity = Vector3.zero
+			end)
+			task.wait(0.05)
+		end
+		return true
+	end
+
+	Button(parent, "⇢ ดึงผู้เล่นที่เลือกมาหาเรา", T.Gold, function()
+		local name = getPlayer and getPlayer()
+		if not name or name == "— ไม่มีผู้เล่นอื่น —" then
+			statusLbl.Text = "ไม่มีผู้เล่นอื่นในเซิร์ฟเวอร์"
+			statusLbl.TextColor3 = T.Danger
+			return
+		end
+		local ok, err = bringPlayer(name)
+		if ok then
+			statusLbl.Text = "Bring → " .. tostring(name)
+			statusLbl.TextColor3 = T.Gold
+		else
+			statusLbl.Text = "Bring ล้มเหลว: " .. tostring(err)
+			statusLbl.TextColor3 = T.Danger
+		end
+	end)
+
 	Button(parent, "↻ รีเฟรชรายชื่อผู้เล่น", T.Card, function()
 		local refreshed = playerNames()
 		local current = getPlayer and getPlayer()
@@ -2197,10 +2258,15 @@ local Farm = {
 	Hitbox         = 18,
 	PlayerAttackHitbox = 30,
 	PlayerHitboxTest = false,
-	Depth          = 2,
-	AttackInterval = 0.025,
+	HeadHeight     = 3,
+	AttackInterval = 0.008,
+	BurstHits = 5,
+	AdaptiveFastAttack = false,
+	FastAttack = true,
+	BypassComboGate = true,
+	NoSwingAnimation = false,
 	AttackRange    = 12,
-	RetreatEnabled = true,
+	RetreatEnabled = false,
 	CounterAttackOnHit = false,
 	_counterAttackPending = false,
 	ComboHits = 5,
@@ -2756,16 +2822,20 @@ local function farmCFrameOf(mob)
 end
 
 local function farmGetSignal()
+	if Farm._cachedSignal and Farm._cachedSignal.Parent then return Farm._cachedSignal end
+	local now = os.clock()
+	if now < (Farm._signalRetryAt or 0) then return nil end
+	Farm._signalRetryAt = now + 0.5
 	local rs = game:GetService("ReplicatedStorage")
 	local ok, sig = pcall(function()
 		return rs.Communication.ServerAndClient.Signals.SignalEvent.Event
 	end)
-	if ok and sig then return sig end
-	local node = rs:FindFirstChild("Communication", true)
-	if node then
-		local s = node:FindFirstChild("SignalEvent", true)
-		if s and s:FindFirstChild("Event") then return s.Event end
+	if not ok or not sig then
+		local node = rs:FindFirstChild("Communication", true)
+		local signals = node and node:FindFirstChild("SignalEvent", true)
+		sig = signals and signals:FindFirstChild("Event")
 	end
+	if sig and sig:IsA("RemoteEvent") then Farm._cachedSignal = sig; return sig end
 	return nil
 end
 
@@ -3310,6 +3380,7 @@ function FarmRetreat:FindUndergroundPosition(char, root, hum, target)
 end
 
 function FarmRetreat:BeginDamage(char, root, hum, target)
+	if not Farm.RetreatEnabled then self:Clear(); return end
 	-- Auto Dungeon must stay on the mob and fight normally.
 	-- Never warp/retreat underground when taking damage in Dungeon mode.
 	if Farm.Dungeon and Farm.Dungeon.Enabled then
@@ -3408,6 +3479,7 @@ function FarmRetreat:Watch()
 end
 
 function FarmRetreat:BeginCombo(target)
+	if not Farm.RetreatEnabled then self:Clear(); return true end
 	-- Dungeon has no retreat at all. Treat the combo retreat request as handled
 	-- so ComboRuntime immediately resumes normal attacking without teleporting.
 	if Farm.Dungeon and Farm.Dungeon.Enabled then
@@ -3818,7 +3890,55 @@ local FarmCharacterState = {
 	Humanoids = setmetatable({}, { __mode = "k" }),
 	Parts = setmetatable({}, { __mode = "k" }),
 	Cameras = setmetatable({}, { __mode = "k" }),
+	SmoothHoverPosition = nil,
+	LastHoverUpdate = 0,
 }
+
+function FarmCharacterState:ReleaseHover()
+	if self.HoverOrientation then self.HoverOrientation:Destroy() end
+	self.HoverOrientation = nil
+	if self.HoverAlign then self.HoverAlign:Destroy() end
+	if self.HoverAttachment then self.HoverAttachment:Destroy() end
+	self.HoverAlign, self.HoverAttachment, self.HoverRoot = nil, nil, nil
+	self.HoverTarget, self.HoverFacing, self.HoverHeadOffset = nil, nil, nil
+	self.SmoothHoverPosition = nil
+	self.LastHoverUpdate = 0
+end
+
+function FarmCharacterState:HoldPosition(root, position, rotation)
+	if self.HoverRoot ~= root or not self.HoverAlign or not self.HoverAlign.Parent
+		or not self.HoverOrientation or not self.HoverOrientation.Parent then
+		self:ReleaseHover()
+		self.HoverRoot = root
+		local attachment = Instance.new("Attachment")
+		attachment.Name = "LuminFarmHoverAttachment"
+		attachment.Parent = root
+		self.HoverAttachment = attachment
+		local align = Instance.new("AlignPosition")
+		align.Name = "LuminFarmHover"
+		align.Mode = Enum.PositionAlignmentMode.OneAttachment
+		align.Attachment0 = attachment
+		align.ApplyAtCenterOfMass = true
+		align.MaxForce = math.max(50000, root.AssemblyMass * workspace.Gravity * 6)
+		align.MaxVelocity = 55
+		align.Responsiveness = 18
+		align.Position = position
+		align.Parent = root
+		self.HoverAlign = align
+		local orientation = Instance.new("AlignOrientation")
+		orientation.Name = "LuminFarmProne"
+		orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+		orientation.Attachment0 = attachment
+		orientation.MaxTorque = 1000000
+		orientation.MaxAngularVelocity = 12
+		orientation.Responsiveness = 18
+		orientation.CFrame = rotation
+		orientation.Parent = root
+		self.HoverOrientation = orientation
+	end
+	self.HoverAlign.Position = position
+	self.HoverOrientation.CFrame = rotation
+end
 
 function FarmCharacterState:RememberHumanoid(hum)
 	if self.Humanoids[hum] == nil then self.Humanoids[hum] = hum.AutoRotate end
@@ -3857,95 +3977,65 @@ local function dungeonHoldPreAttack(mob)
 	return true
 end
 
+function Farm:AttackPoint(mob)
+	if not mob or not mob.Parent then return nil end
+	local head = mob:FindFirstChild("Head", true)
+	if head and head:IsA("BasePart") then return head.Position end
+	local root = mob:FindFirstChild("HumanoidRootPart", true)
+	if root and root:IsA("BasePart") then return root.Position end
+	return nil
+end
+
+-- Name retained for existing farm callers; positioning now follows the head.
 local function farmMoveUnder(mob)
 	if not mob or not mob.Parent then return false end
-	local cf
-	if Farm.Dungeon and Farm.Dungeon.Enabled and Farm.Dungeon.TargetRoot then
-		-- Dungeon mobs can dodge/dash, so always follow the live HRP instead of
-		-- a model pivot that may lag behind during movement animations.
-		local targetRoot = Farm.Dungeon:TargetRoot(mob)
-		cf = targetRoot and targetRoot.CFrame or nil
-	else
-		cf = farmCFrameOf(mob)
-	end
-	if not cf then return false end
+	local targetRoot = mob:FindFirstChild("HumanoidRootPart", true)
+	local targetPosition = Farm:AttackPoint(mob)
+	if not targetRoot or not targetPosition then return false end
 	local char = player.Character
-	if not char then return false end
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-	local hum = char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	if not hrp or not hum or hum.Health <= 0 then return false end
 
-	local targetPosition = cf.Position
+	local changedTarget = FarmCharacterState.HoverTarget ~= mob or FarmCharacterState.HoverRoot ~= hrp
+	local facing = FarmCharacterState.HoverFacing
+	local headOffset = FarmCharacterState.HoverHeadOffset
+	if changedTarget or not facing then
+		local look = hrp.CFrame.LookVector
+		facing = Vector3.new(look.X, 0, look.Z)
+		facing = facing.Magnitude > 0.01 and facing.Unit or Vector3.new(0, 0, -1)
+		headOffset = math.clamp(targetPosition.Y - targetRoot.Position.Y, 0, 5)
+	end
 	local range = math.max(1.5, tonumber(Farm.AttackRange) or 12)
-	local minimum = math.min(1, math.max(0.5, hrp.Size.Y * 0.25))
-	local depth = math.clamp(tonumber(Farm.Depth) or 2, minimum, range - 0.5)
-
-	-- Dungeon uses a two-step teleport:
-	-- 1) hover high above the target for a brief moment
-	-- 2) drop to the normal UNDER-target attack position and start swinging.
-	if Farm.Dungeon and Farm.Dungeon.Enabled then
-		local dungeon = Farm.Dungeon
-		local now = os.clock()
-		local anchor = dungeon.ApproachAnchor
-		local moved = anchor and (targetPosition - anchor).Magnitude
-		local needsApproach = dungeon.ApproachTarget ~= mob
-			or not anchor
-			or (moved and moved >= (tonumber(dungeon.ReapproachDistance) or 10))
-
-		if needsApproach then
-			-- Start a fresh approach. The attack is pressed only AFTER we arrive
-			-- in the sky position, then held until we drop underneath the mob.
-			dungeonReleasePreAttack()
-			dungeon.ApproachTarget = mob
-			dungeon.ApproachAnchor = targetPosition
-			dungeon.ApproachReadyAt = now + math.clamp(tonumber(dungeon.ApproachDelay) or 1.0, 0.1, 3)
-		end
-
-		if now < (dungeon.ApproachReadyAt or 0) then
-			local skyHeight = math.clamp(tonumber(dungeon.ApproachSkyHeight) or 60, 15, 150)
-			local skyPosition = targetPosition + Vector3.new(0, skyHeight, 0)
-			FarmCharacterState:RememberHumanoid(hum)
-			hum.AutoRotate = false
-			hrp.CFrame = CFrame.lookAt(skyPosition, targetPosition, Vector3.new(0, 0, -1))
-			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.AssemblyAngularVelocity = Vector3.zero
-			-- Once we are actually up in the sky, press M1 and KEEP holding it.
-			dungeonHoldPreAttack(mob)
-			return false
-		end
-
-		-- Refresh the anchor only after the sky-wait stage completed.
-		dungeon.ApproachAnchor = targetPosition
-	end
-
-	local desiredPosition
-	if Farm.Dungeon and Farm.Dungeon.Enabled then
-		-- After waiting above the mob, drop underneath and attack from below.
-		desiredPosition = targetPosition - Vector3.new(0, depth, 0)
-	elseif Farm.BossEnabled and tostring(Farm.BossName):lower() == "yeti demon" then
-		-- Yeti Demon is very large: fight from behind instead of underneath.
-		local forward = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
-		if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) end
-		forward = forward.Unit
-		local behindDistance = math.clamp(4, 2, math.max(2, range - 1))
-		desiredPosition = targetPosition - forward * behindDistance
+	local height = math.clamp(tonumber(Farm.HeadHeight) or 3, 1, range - 0.5)
+	-- Lie face-down above the target with a stable horizontal up axis.
+	local rawDesiredPosition = targetRoot.Position + Vector3.new(0, headOffset + height, 0)
+	local now = os.clock()
+	local dt = math.clamp(now - (FarmCharacterState.LastHoverUpdate or now), 0, 0.05)
+	FarmCharacterState.LastHoverUpdate = now
+	local smooth = FarmCharacterState.SmoothHoverPosition
+	if changedTarget or not smooth or (smooth - rawDesiredPosition).Magnitude > 25 then
+		smooth = rawDesiredPosition
 	else
-		desiredPosition = targetPosition - Vector3.new(0, depth, 0)
+		local alpha = 1 - math.exp(-12 * math.max(dt, 1 / 240))
+		smooth = smooth:Lerp(rawDesiredPosition, alpha)
 	end
-
-	local attackUp = Vector3.new(0, 1, 0)
-
+	FarmCharacterState.SmoothHoverPosition = smooth
+	local desiredPosition = smooth
+	local desired = CFrame.lookAt(desiredPosition, desiredPosition - Vector3.yAxis, facing)
 	FarmCharacterState:RememberHumanoid(hum)
-	hum.AutoRotate = false
-	hrp.CFrame = CFrame.lookAt(desiredPosition, targetPosition, attackUp)
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.AssemblyAngularVelocity = Vector3.zero
-
-	if Farm.Dungeon and Farm.Dungeon.Enabled then
-		-- We arrived at attack range. Release the M1 that was held before the
-		-- teleport, then let the normal auto-attack loop continue immediately.
-		dungeonReleasePreAttack()
+	if hum.AutoRotate then hum.AutoRotate = false end
+	if changedTarget or (hrp.Position - desiredPosition).Magnitude > 10 then
+		hrp.CFrame = desired
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
 	end
+	-- Hold both position and prone rotation without rewriting CFrame every frame.
+	FarmCharacterState:HoldPosition(hrp, desiredPosition, desired.Rotation)
+	FarmCharacterState.HoverTarget = mob
+	FarmCharacterState.HoverFacing = facing
+	FarmCharacterState.HoverHeadOffset = headOffset
+	if Farm.Dungeon and Farm.Dungeon.Enabled then dungeonReleasePreAttack() end
 	return true
 end
 
@@ -3959,7 +4049,7 @@ local function farmKeepCharacterVisible()
 	player.CameraMaxZoomDistance = 24
 	player.CameraMinZoomDistance = 7
 
-	Farm._cameraConn = RunService.RenderStepped:Connect(function()
+	Farm._cameraConn = RunService.RenderStepped:Connect(function(dt)
 		if not Farm.Enabled then return end
 		local char = player.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3968,6 +4058,8 @@ local function farmKeepCharacterVisible()
 			if not FarmCharacterState.Cameras[camera] then
 				FarmCharacterState.Cameras[camera] = { Subject = camera.CameraSubject }
 			end
+			-- Use Roblox's normal Humanoid camera. The old moving anchor amplified
+			-- tiny hover corrections into visible screen shake.
 			if camera.CameraSubject ~= hum then camera.CameraSubject = hum end
 		end
 		if char and (FarmCharacterState.Character ~= char or os.clock() >= FarmCharacterState.NextScanAt) then
@@ -3986,6 +4078,7 @@ local function farmKeepCharacterVisible()
 end
 
 local function farmRestoreCharacter()
+	FarmCharacterState:ReleaseHover()
 	if Farm._cameraConn then
 		Farm._cameraConn:Disconnect()
 		Farm._cameraConn = nil
@@ -4000,6 +4093,10 @@ local function farmRestoreCharacter()
 		if camera.Parent and (saved.Subject == nil or saved.Subject.Parent) then
 			pcall(function() camera.CameraSubject = saved.Subject end)
 		end
+	end
+	if FarmCharacterState.CameraAnchor then
+		FarmCharacterState.CameraAnchor:Destroy()
+		FarmCharacterState.CameraAnchor = nil
 	end
 	local saved = FarmCharacterState.Player
 	if saved then
@@ -4182,7 +4279,105 @@ local CombatRuntime = {
 	Character = nil, Humanoid = nil, Selection = nil, TargetKey = nil,
 	Driver = 1, DriverAttempts = 0, LastProgressAt = 0, LastSwingAt = 0,
 	LastHealth = nil, State = "idle", Connections = {},
+	AdaptiveInterval = 0.05, NoDamageAttempts = 0,
+	HiddenTracks = setmetatable({}, { __mode = "k" }),
 }
+
+local CombatTrace = {
+	Enabled = false,
+	ManualClicks = 0,
+	Lines = {},
+}
+
+function CombatTrace:Push(message)
+	local line = string.format("[CombatTrace %.3f] %s", os.clock(), tostring(message))
+	table.insert(self.Lines, line)
+	if #self.Lines > 160 then table.remove(self.Lines, 1) end
+	_G.__MAZX_COMBAT_TRACE = table.concat(self.Lines, "\n")
+	warn(line)
+end
+
+function CombatTrace:Snapshot(tag)
+	if not self.Enabled then return end
+	local char = player.Character
+	if not char then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local keywords = { "combo", "attack", "cooldown", "recover", "stun", "debounce", "swing", "m1", "hit" }
+	local function wanted(name)
+		name = tostring(name):lower()
+		for _, key in ipairs(keywords) do if name:find(key, 1, true) then return true end end
+		return false
+	end
+	self:Push("SNAP " .. tostring(tag))
+	for _, root in ipairs({ player, char, hum, tool }) do
+		if root then
+			for key, value in pairs(root:GetAttributes()) do
+				if wanted(key) then self:Push(root.Name .. ".@" .. key .. "=" .. tostring(value)) end
+			end
+			for _, obj in ipairs(root:GetDescendants()) do
+				if wanted(obj.Name) and (obj:IsA("BoolValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("StringValue")) then
+					self:Push(root.Name .. "." .. obj:GetFullName() .. "=" .. tostring(obj.Value))
+				end
+			end
+		end
+	end
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+	if animator then
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+			local anim = track.Animation
+			self:Push(string.format("ANIM name=%s id=%s pos=%.3f len=%.3f speed=%.2f",
+				tostring(track.Name), tostring(anim and anim.AnimationId or ""), track.TimePosition or 0, track.Length or 0, track.Speed or 0))
+		end
+	end
+end
+
+table.insert(CombatRuntime.Connections, UserInputService.InputBegan:Connect(function(input, processed)
+	if not CombatTrace.Enabled or processed or Farm._sendingClick then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+	CombatTrace.ManualClicks += 1
+	local n = CombatTrace.ManualClicks
+	CombatTrace:Push("MANUAL M1 #" .. n)
+	if n % 5 == 0 then
+		CombatTrace:Snapshot("hit5 +0.00")
+		for _, delayTime in ipairs({ 0.10, 0.30, 0.70, 1.20 }) do
+			task.delay(delayTime, function()
+				if CombatTrace.Enabled then CombatTrace:Snapshot(string.format("hit5 +%.2f", delayTime)) end
+			end)
+		end
+	end
+end))
+
+function CombatRuntime:RecordFrame(dt)
+	self.PerfFrames = (self.PerfFrames or 0) + 1
+	self.PerfSeconds = (self.PerfSeconds or 0) + dt
+	if self.PerfSeconds < 1 then return end
+	local elapsed = self.PerfSeconds
+	if self.PerfLabel and self.PerfLabel.Parent then
+		local method = self.Driver == 3 and "Signal" or (self.Driver == 2 and "Tool" or "Mouse")
+		self.PerfLabel.Text = string.format("FPS ~%.0f | ส่ง %.1f/s | HP ลด %.1f ครั้ง/s\n%s | %s",
+			self.PerfFrames / elapsed, (self.SentAttacks or 0) / elapsed,
+			(self.HealthDrops or 0) / elapsed, method, self.State)
+	end
+	self.PerfFrames, self.PerfSeconds, self.SentAttacks, self.HealthDrops = 0, 0, 0, 0
+end
+
+function CombatRuntime:RestoreSwingAnimations()
+	for track, weight in pairs(self.HiddenTracks) do
+		pcall(function() if track.IsPlaying then track:AdjustWeight(weight, 0.08) end end)
+		self.HiddenTracks[track] = nil
+	end
+end
+
+function CombatRuntime:HideSwingAnimation(track)
+	if not Farm.NoSwingAnimation or not self:CombatReady() or Farm._skillHeld
+		or os.clock() < (Farm._skillReadyAt or 0) then return end
+	pcall(function()
+		if self.HiddenTracks[track] == nil then self.HiddenTracks[track] = track.WeightTarget end
+		-- Keep the track running: Stop/AdjustSpeed can break weapon hit markers.
+		track:AdjustWeight(0, 0)
+	end)
+end
 
 function CombatRuntime:ReleaseAttack()
 	local held = self.Held
@@ -4202,8 +4397,10 @@ function CombatRuntime:ReleaseEquip()
 	pcall(function() held.Input:SendKeyEvent(false, held.Key, false, game) end)
 end
 
-function CombatRuntime:Release()
+function CombatRuntime:Release(preserveHover)
+	if not preserveHover then FarmCharacterState:ReleaseHover() end
 	self:ReleaseAttack()
+	self:RestoreSwingAnimations()
 	self:ReleaseEquip()
 	if Farm.ReleaseSkills then Farm.ReleaseSkills() end
 	if Farm.ResetCombo then Farm.ResetCombo() end
@@ -4219,12 +4416,22 @@ end
 
 function CombatRuntime:ResetProgress()
 	if Farm.ResetCombo then Farm.ResetCombo() end
-	self.Driver, self.DriverAttempts = UserInputService.TouchEnabled and 2 or 1, 0
+	self.Driver = Farm.FastAttack and 1 or (self.PreferredDriver or (UserInputService.TouchEnabled and 2 or 1))
+	self.DriverAttempts = 0
+	self.DriverHasDamage = false
 	self.LastHealth, self.LastSwingAt = nil, 0
+	self.AdaptiveInterval = math.clamp(tonumber(Farm.AttackInterval) or 0.008, 0.005, 0.08)
+	self.NoDamageAttempts = 0
 	self.LastProgressAt = os.clock()
 end
 
 function CombatRuntime:NextDriver()
+	self.DriverHasDamage = false
+	-- Hiding an animation must not lock combat to a signal that causes no damage.
+	if Farm.FastAttack then
+		self.Driver = 1
+		return
+	end
 	self.Driver = UserInputService.TouchEnabled and (self.Driver == 2 and 3 or 2) or (self.Driver % 3 + 1)
 end
 
@@ -4317,32 +4524,90 @@ local function farmEquipSelectedWeapon(char, hum)
 end
 
 function CombatRuntime:CombatReady()
-	if not Farm.Enabled or not Farm.AutoAttack or Farm._questBusy or Farm._lootBusy or Farm._bettyBusy or Farm._storyBusy or Farm._deliveryBusy or Farm._pagesBusy or Farm._bearBusy
-	or FarmRetreat.Until > os.clock() or attackInputBlocked()
-	or not gui.Parent or _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN then return false end
+	if not Farm.Enabled or not Farm.AutoAttack
+		or not gui.Parent or _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN then return false, "ฟาร์มยังไม่เปิด" end
+	if Farm._questBusy or Farm._lootBusy or Farm._bettyBusy or Farm._storyBusy
+		or Farm._deliveryBusy or Farm._pagesBusy or Farm._bearBusy then return false, "รอเควส / เก็บของ" end
+	if not Farm.FastAttack and FarmRetreat.Until > os.clock() then return false, "รอถอยหลังคอมโบ" end
+	if attackInputBlocked() then return false, "รอปิดแชต / เมนูเกม" end
 	local quest = Farm.AutoQuest and farmCurrentQuestSpec() or nil
-	if quest and (Farm._questNeeded or Farm._acceptedQuestText ~= quest.Text) then return false end
+	if quest and (Farm._questNeeded or Farm._acceptedQuestText ~= quest.Text) then return false, "รอรับเควส" end
 	local char = player.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	local target = Farm._attackTarget
-	if char ~= self.Character or not hum or hum.Health <= 0 or not root
-	or not self:TargetAlive(target) then return false end
+	if char ~= self.Character or not hum or hum.Health <= 0 or not root then return false, "รอตัวละครพร้อม" end
+	if not self:TargetAlive(target) then return false, "รอเป้าหมาย" end
+	local aim = Farm:AttackPoint(target)
+	if not aim then return false, "ไม่พบจุดโจมตี" end
+	local range = tonumber(Farm.AttackRange) or 12
+	if Farm.Dungeon and Farm.Dungeon.Enabled then range = math.max(range, 5) end
+	local distance = (aim - root.Position).Magnitude
+	if distance > range then return false, string.format("นอกระยะ %.1f / %.1f", distance, range) end
+	return true
+end
 
-	if Farm.Dungeon and Farm.Dungeon.Enabled then
-		-- Follow a dodging target again in the same tick as the hit check.
-		if not farmMoveUnder(target) then return false end
-		local targetRoot = Farm.Dungeon:TargetRoot(target)
-		if not targetRoot then return false end
-		local distance = (targetRoot.Position - root.Position).Magnitude
-		return distance <= math.max(tonumber(Farm.AttackRange) or 12, 5)
+function CombatRuntime:UnbindGameComboGate()
+	if self.ComboGateConnection then
+		self.ComboGateConnection:Disconnect()
+		self.ComboGateConnection = nil
+	end
+	self.ComboGateValue = nil
+	self.PendingComboReset = false
+	self.PendingComboAt = nil
+	self.PendingComboTarget = nil
+end
+
+function CombatRuntime:BindGameComboGate()
+	self:UnbindGameComboGate()
+	if not Farm.FastAttack or not Farm.BypassComboGate then return end
+
+	local scripts = player:FindFirstChild("PlayerScripts")
+	local cu = scripts and scripts:FindFirstChild("CU")
+	local combat = cu and cu:FindFirstChild("Combat")
+	local combo = combat and combat:FindFirstChild("ComboValue")
+	if not combo or not (combo:IsA("IntValue") or combo:IsA("NumberValue")) then return end
+
+	self.ComboGateValue = combo
+	self.ComboGateConnection = combo:GetPropertyChangedSignal("Value"):Connect(function()
+		if not Farm.FastAttack or not Farm.BypassComboGate then return end
+		if combo.Parent and combo.Value >= 5 then
+			-- Do NOT reset immediately. Resetting before the fifth hit is
+			-- server-confirmed can cancel its damage packet.
+			self.PendingComboReset = true
+			self.PendingComboAt = os.clock()
+			self.PendingComboTarget = Farm._attackTarget
+		end
+	end)
+end
+
+function CombatRuntime:ConfirmComboDamage(target)
+	if not Farm.FastAttack or not Farm.BypassComboGate then return end
+	if not self.PendingComboReset then return end
+	if self.PendingComboTarget and target ~= self.PendingComboTarget then return end
+
+	local combo = self.ComboGateValue
+	if combo and combo.Parent and (combo:IsA("IntValue") or combo:IsA("NumberValue")) then
+		pcall(function()
+			if combo.Value >= 5 then combo.Value = 1 end
+		end)
 	end
 
-	local cf = farmCFrameOf(target)
-	return cf ~= nil and (cf.Position - root.Position).Magnitude <= Farm.AttackRange
+	self.PendingComboReset = false
+	self.PendingComboAt = nil
+	self.PendingComboTarget = nil
+	self.NextAttackAt = 0
 end
 
 function CombatRuntime:Dispatch(tool)
+	if self.Driver == 1 and main.Visible and not Farm.FastAttack then
+		if tool and tool.Parent == player.Character then
+			self.Driver = 2
+			self.DriverHasDamage = false
+		else
+			return nil
+		end
+	end
 	if self.Driver == 1 then
 		local camera = workspace.CurrentCamera
 		if not camera then return false end
@@ -4355,7 +4620,7 @@ function CombatRuntime:Dispatch(tool)
 			vim:SendMouseButtonEvent(held.X, held.Y, 0, true, game, 0)
 		end)
 		if not ok then self:ReleaseAttack(); return false end
-		task.delay(0.015, function()
+		task.delay(Farm.FastAttack and 0.004 or 0.015, function()
 			if self.Held == held then self:ReleaseAttack() end
 		end)
 		return true
@@ -4372,7 +4637,14 @@ function CombatRuntime:Dispatch(tool)
 	else
 		local ev = farmGetSignal()
 		if not ev then return false end
-		return pcall(function() ev:FireServer("Combat_Service", "Combat", 1, false, 0.13, false, nil) end)
+		-- Fast burst: keep one Heartbeat driver, but send several combat requests
+		-- inside the scheduled attack window so the client does not wait on swing recovery.
+		local burst = Farm.FastAttack and math.clamp(math.floor(tonumber(Farm.BurstHits) or 5), 1, 10) or 1
+		return pcall(function()
+			for _ = 1, burst do
+				ev:FireServer("Combat_Service", "Combat", 1, false, 0.13, false, nil)
+			end
+		end)
 	end
 end
 
@@ -4392,6 +4664,7 @@ function ComboRuntime:ClearCount()
 end
 
 function ComboRuntime:Reset()
+	CombatRuntime:RestoreSwingAnimations()
 	self.Generation += 1
 	for _, connection in ipairs(self.Connections) do connection:Disconnect() end
 	self.Connections = {}
@@ -4405,16 +4678,49 @@ Farm.ResetCombo = function() ComboRuntime:Reset() end
 function ComboRuntime:IsBasicTrack(track)
 	if track.Looped then return false end
 	local animation = track.Animation
+	local combined = (tostring(track.Name or "") .. " " .. tostring(animation and animation.Name or "")):lower()
+	for _, excluded in ipairs({ "skill", "dash", "jump", "fall", "idle", "walk", "run", "equip", "block", "hurt", "stun" }) do
+		if combined:find(excluded, 1, true) then return false end
+	end
 	for _, raw in ipairs({ track.Name or "", animation and animation.Name or "" }) do
 		local name = raw:lower():gsub("[%s_%-]", "")
+		if name:match("^[1-5]$") then return true end
 		for _, stem in ipairs({ "m1", "attack", "basicattack", "lightattack", "slash", "swing", "punch", "melee" }) do
-			if name:match("^" .. stem .. "%d*$") then return true end
+			if name:find(stem, 1, true) then return true end
 		end
 	end
-	return false
+	-- Some weapons use generic track names. Only classify an Action-priority
+	-- track during our direct basic-attack window, never during a skill window.
+	return Farm.FastAttack and Farm.NoSwingAnimation and CombatRuntime.Driver == 3
+		and not Farm._skillHeld and os.clock() >= (Farm._skillReadyAt or 0)
+		and (self.InFlight or os.clock() - self.LastDispatchAt <= 0.2)
+		and track.Priority ~= nil and track.Priority.Value >= Enum.AnimationPriority.Action.Value
+end
+
+function ComboRuntime:RefreshHiddenTracks()
+	if not Farm.NoSwingAnimation then return end
+	local now = os.clock()
+	if now < (self.NextWeightRefresh or 0) then return end
+	self.NextWeightRefresh = now + 0.1
+	-- Reapply only to the small set of known attack tracks if the game fades
+	-- them back in. Do not scan all animations or stop their hit markers.
+	for track in pairs(CombatRuntime.HiddenTracks) do
+		pcall(function()
+			if not track.IsPlaying then CombatRuntime.HiddenTracks[track] = nil
+			elseif track.WeightTarget > 0 then track:AdjustWeight(0, 0) end
+		end)
+	end
+end
+
+function ComboRuntime:OnBasicTrack(track)
+	if not self:IsBasicTrack(track) then return end
+	self:Evidence("animation", track)
+	CombatRuntime:HideSwingAnimation(track)
 end
 
 function ComboRuntime:Evidence(source, track)
+	-- No block, animation recovery wait, or retreat after five hits in this mode.
+	if not Farm.RetreatEnabled or (Farm.Dungeon and Farm.Dungeon.Enabled) then return end
 	if self.InFlight then
 		table.insert(self.Buffered, { Source = source, Track = track })
 		return
@@ -4477,8 +4783,12 @@ function ComboRuntime:Prepare(target, char, hum, tool)
 			self.Animator = animator
 			local generation = self.Generation
 			table.insert(self.Connections, animator.AnimationPlayed:Connect(function(track)
-				if generation == self.Generation and self:IsBasicTrack(track) then self:Evidence("animation", track) end
+				if generation == self.Generation then self:OnBasicTrack(track) end
 			end))
+			-- Hide a basic swing already playing when the target is acquired.
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				if self:IsBasicTrack(track) then CombatRuntime:HideSwingAnimation(track) end
+			end
 		end
 	end
 	self.InFlight, self.Buffered = true, {}
@@ -4494,6 +4804,10 @@ function ComboRuntime:Dispatched(success)
 end
 
 function ComboRuntime:Step()
+	if not Farm.RetreatEnabled or (Farm.Dungeon and Farm.Dungeon.Enabled) then
+		if self.PendingAt or self.Count > 0 then self:ClearCount() end
+		return false
+	end
 	if not self.PendingAt then return false end
 	if self.Character ~= player.Character or self.Target ~= Farm._attackTarget
 		or self.Weapon ~= player.Character:FindFirstChildOfClass("Tool")
@@ -4521,20 +4835,30 @@ local function attackSwing()
 		Farm._counterAttackPending = false
 		CombatRuntime.NextAttackAt = 0
 	end
-	-- Dungeon mobs may dodge on the exact frame we arrive. Chase the locked
-	-- HRP again inside the attack loop, then check range and swing immediately.
-	if Farm.Dungeon and Farm.Dungeon.Enabled and Farm._attackTarget then
-		farmMoveUnder(Farm._attackTarget)
-	end
-	if not CombatRuntime:CombatReady() then
-		CombatRuntime:Release()
+	-- Rate-limit readiness scans as well as remote dispatches.
+	if now < CombatRuntime.NextAttackAt and not CombatRuntime.Held then return end
+	-- Movement happens only in CombatRuntime:Step(), not again per attack.
+	local ready, reason = CombatRuntime:CombatReady()
+	if not ready then
+		-- Movement owns hover cleanup; a temporary attack pause must not drop us.
+		CombatRuntime:Release(true)
+		CombatRuntime.State = reason or "waiting"
+		CombatRuntime.NextAttackAt = now + (Farm.FastAttack and 0.005 or 0.05)
 		return
 	end
-	if Farm._skillHeld or now < (Farm._skillReadyAt or 0) then
+	if not Farm.FastAttack and (Farm._skillHeld or now < (Farm._skillReadyAt or 0)) then
 		CombatRuntime:ReleaseAttack()
+		CombatRuntime:RestoreSwingAnimations()
+		CombatRuntime.State = "รอสกิลจบ"
 		return
 	end
-	if ComboRuntime:Step() then return end
+	if not Farm.FastAttack then
+		if ComboRuntime:Step() then
+			CombatRuntime.State = "รอพักหลังคอมโบ"
+			return
+		end
+		ComboRuntime:RefreshHiddenTracks()
+	end
 	if CombatRuntime.Held or now < CombatRuntime.NextAttackAt then return end
 	local char = player.Character
 	local hum = char:FindFirstChildOfClass("Humanoid")
@@ -4543,27 +4867,64 @@ local function attackSwing()
 	local target = Farm._attackTarget
 	local targetHum = target:FindFirstChildWhichIsA("Humanoid", true)
 	local health = targetHum.Health
-	if not CombatRuntime.LastHealth or health < CombatRuntime.LastHealth
-	or now - CombatRuntime.LastSwingAt > 0.5 then
+	local previousHealth = CombatRuntime.LastHealth
+	local serverConfirmedHit = previousHealth ~= nil and health < previousHealth
+	if serverConfirmedHit then
+		CombatRuntime.DriverHasDamage = true
+		CombatRuntime.PreferredDriver = CombatRuntime.Driver
+		CombatRuntime.HealthDrops = (CombatRuntime.HealthDrops or 0) + 1
+		-- Only restart the combo after replicated target HP proves the
+		-- previous attack really dealt damage.
+		CombatRuntime:ConfirmComboDamage(target)
+	end
+	if previousHealth == nil or serverConfirmedHit then
 		CombatRuntime.LastProgressAt = now
 		CombatRuntime.DriverAttempts = 0
+		CombatRuntime.NoDamageAttempts = 0
+		if Farm.FastAttack and Farm.AdaptiveFastAttack and serverConfirmedHit then
+			CombatRuntime.AdaptiveInterval = math.max(0.005,
+				(CombatRuntime.AdaptiveInterval or Farm.AttackInterval or 0.008) - 0.001)
+		end
+	elseif Farm.FastAttack and Farm.AdaptiveFastAttack then
+		CombatRuntime.NoDamageAttempts = (CombatRuntime.NoDamageAttempts or 0) + 1
+		if CombatRuntime.NoDamageAttempts >= 6 then
+			CombatRuntime.AdaptiveInterval = math.min(0.08,
+				(CombatRuntime.AdaptiveInterval or Farm.AttackInterval or 0.008) + 0.002)
+			CombatRuntime.NoDamageAttempts = 0
+		end
 	end
 	CombatRuntime.LastHealth, CombatRuntime.LastSwingAt = health, now
-	if now - CombatRuntime.LastProgressAt >= 5 and CombatRuntime.DriverAttempts >= 8 then
+	-- Only allow the longer combo-recovery window after observing HP loss
+	-- with this method on this target. Unproven methods should fail over sooner.
+	local recoveryWindow = 5
+	if not Farm.FastAttack and now - CombatRuntime.LastProgressAt >= recoveryWindow and CombatRuntime.DriverAttempts >= 8 then
 		CombatRuntime:ReleaseAttack()
-		CombatRuntime:NextDriver()
-		CombatRuntime.DriverAttempts = 0
-		CombatRuntime.LastProgressAt = now
-		CombatRuntime.NextAttackAt = now + 0.2
-		CombatRuntime.State = "recovering"
+		if Farm.FastAttack then
+			CombatRuntime.DriverAttempts = 0
+			CombatRuntime.LastProgressAt = now
+			CombatRuntime.NextAttackAt = now + 0.005
+			CombatRuntime.State = "fast attack"
+		else
+			CombatRuntime:NextDriver()
+			CombatRuntime.DriverAttempts = 0
+			CombatRuntime.LastProgressAt = now
+			CombatRuntime.NextAttackAt = now + 0.2
+			CombatRuntime.State = "switching attack method"
+		end
 		return
 	end
-	ComboRuntime:Prepare(target, char, hum, tool)
+	if not Farm.FastAttack then ComboRuntime:Prepare(target, char, hum, tool) end
 	farmTrackQuestDeath(target, health)
 	local dispatched = CombatRuntime:Dispatch(tool)
-	ComboRuntime:Dispatched(dispatched)
-	CombatRuntime.NextAttackAt = now + math.max(Farm.AttackInterval, 0.025)
+	if not Farm.FastAttack then ComboRuntime:Dispatched(dispatched) end
+	-- Adaptive mode speeds up only while replicated HP proves damage is landing.
+	local nextInterval = Farm.FastAttack and Farm.AdaptiveFastAttack
+		and (CombatRuntime.AdaptiveInterval or Farm.AttackInterval)
+		or Farm.AttackInterval
+	-- Burst mode schedules aggressively; the single Heartbeat connection prevents runaway task spam.
+	CombatRuntime.NextAttackAt = now + math.clamp(tonumber(nextInterval) or 0.008, 0.005, 0.08)
 	if dispatched then
+		CombatRuntime.SentAttacks = (CombatRuntime.SentAttacks or 0) + 1
 		-- Dungeon Kill Aura may only finish a mob after this normal Auto Attack
 		-- has actually dispatched two attack presses to the same target.
 		if Farm.Dungeon and Farm.Dungeon.Enabled and Farm.Dungeon.KillAura and target then
@@ -4575,16 +4936,26 @@ local function attackSwing()
 		CombatRuntime.DriverAttempts += 1
 		CombatRuntime.BasicTurnPending = false
 		CombatRuntime.State = "attacking"
+	elseif dispatched == nil then
+		CombatRuntime.State = "ซ่อนเมนูเพื่อให้ Mouse โจมตี"
+		CombatRuntime.NextAttackAt = now + (Farm.FastAttack and 0.005 or 0.15)
 	else
-		CombatRuntime:NextDriver()
-		CombatRuntime.NextAttackAt = now + 0.5
-		CombatRuntime.State = "retrying"
+		if Farm.FastAttack then
+			CombatRuntime.Driver = 1
+			CombatRuntime.NextAttackAt = now + 0.005
+			CombatRuntime.State = "fast retry"
+		else
+			CombatRuntime:NextDriver()
+			CombatRuntime.NextAttackAt = now + 0.5
+			CombatRuntime.State = "retrying"
+		end
 	end
 end
 
 local function attackStop()
 	Farm.AutoAttack = false
 	if Farm._attackConn then Farm._attackConn:Disconnect(); Farm._attackConn = nil end
+	CombatRuntime:UnbindGameComboGate()
 	CombatRuntime:Release()
 end
 
@@ -4592,7 +4963,11 @@ local function attackStart()
 	if Farm._attackConn then Farm._attackConn:Disconnect() end
 	CombatRuntime.NextAttackAt = 0
 	CombatRuntime:ResetProgress()
-	Farm._attackConn = RunService.Heartbeat:Connect(function()
+	CombatRuntime:BindGameComboGate()
+	CombatRuntime.PerfFrames, CombatRuntime.PerfSeconds = 0, 0
+	CombatRuntime.SentAttacks, CombatRuntime.HealthDrops = 0, 0
+	Farm._attackConn = RunService.Heartbeat:Connect(function(dt)
+		CombatRuntime:RecordFrame(dt)
 		if os.clock() < (CombatRuntime.AttackErrorAt or 0) then return end
 		local ok, err = pcall(attackSwing)
 		if not ok then
@@ -4613,7 +4988,7 @@ function CombatRuntime:SetTarget(target)
 	farmMultiBossWatchTarget(target)
 	if Farm._target == target then return end
 	self:Release()
-	farmExtendMobHitbox(target)
+	if not Farm.FastAttack then farmExtendMobHitbox(target) end
 	Farm._target, Farm._attackTarget = target, nil
 	self:ResetProgress()
 end
@@ -4622,9 +4997,12 @@ function CombatRuntime:Step()
 	if not Farm.Enabled then return end
 	local char = player.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if Farm.Dungeon and Farm.Dungeon.Enabled and (char ~= Farm.Dungeon.Character or not hum or hum.Health <= 0) then
-		Farm.Dungeon:SetEnabled(false); return
+	if Farm.Dungeon and Farm.Dungeon.Enabled and char ~= Farm.Dungeon.Character then
+		Farm.Dungeon:ClearIsolation()
+		Farm.Dungeon.Character = char
+		Farm.Dungeon.NextTargetAt = 0
 	end
+	-- Missing/dead characters use the normal respawn wait below; keep the toggle on.
 	if char ~= self.Character or hum ~= self.Humanoid then
 		BossLoot:Reset()
 		self:Release()
@@ -4767,10 +5145,14 @@ function CombatRuntime:Step()
 			return
 		end
 	end
-	-- Dungeon approaches in two steps: underground below the live HRP first,
-	-- then moves to attack range. A large dodge triggers that approach again.
-	farmExtendHitbox()
-	farmExtendMobHitbox(target)
+	-- Direct attacks do not need huge touching weapon parts. Avoid repeatedly
+	-- resizing every blade/handle and the NPC's physics root in fast mode.
+	if Farm.FastAttack then
+		if not Farm.PlayerHitboxTest and (next(Farm._hitboxOriginals) or next(Farm._mobHitboxOriginals)) then farmRestoreHitbox() end
+	else
+		farmExtendHitbox()
+		farmExtendMobHitbox(target)
+	end
 	if farmMoveUnder(target) then
 		Farm._attackTarget = target
 	else
@@ -4848,6 +5230,8 @@ local function farmStart()
 			return
 		end
 		if os.clock() < CombatRuntime.NextRecoveryAt then return end
+		if os.clock() < (CombatRuntime.NextStepAt or 0) then return end
+		CombatRuntime.NextStepAt = os.clock() + 1 / 30
 		local ok, err = pcall(function() CombatRuntime:Step() end)
 		if not ok then
 			Farm._attackTarget = nil
@@ -7375,6 +7759,7 @@ Farm.ReleaseSkills = function() AutoSkills:Release() end
 
 function AutoSkills:CanUse()
 	if not self.Running or not self.Enabled then return false end
+	if Farm.FastAttack then return false end
 	if Farm._comboPending then return false end
 	return CombatRuntime:CombatReady()
 end
@@ -7968,32 +8353,54 @@ function Farm.Dungeon:ValidTarget(model)
 	return hum ~= nil and hum.Health > 0 and root ~= nil
 end
 
+function Farm.Dungeon:StopTargetIndex()
+	if self.RootAdded then self.RootAdded:Disconnect(); self.RootAdded = nil end
+	if self.RootRemoved then self.RootRemoved:Disconnect(); self.RootRemoved = nil end
+	self.RootIndex, self.CachedCandidate, self.NextFindAt = nil, nil, 0
+end
+
 function Farm.Dungeon:FindTarget()
+	local now = os.clock()
+	if now < (self.NextFindAt or 0) then
+		return self:ValidTarget(self.CachedCandidate) and self.CachedCandidate or nil
+	end
+	self.NextFindAt = now + 0.2
 	local char = player.Character
 	local charRoot = char and char:FindFirstChild("HumanoidRootPart")
-	if not charRoot then return nil end
+	if not charRoot then self.CachedCandidate = nil; return nil end
 
-	-- Dungeon rule: attack EVERY living model that has HumanoidRootPart
-	-- within 300 studs of the player. No NPC-folder/name filtering.
-	local radius = math.max(1, tonumber(self.Radius) or 300)
-	local best, bestDistance = nil, math.huge
-	local seen = {}
-
-	for _, part in ipairs(workspace:GetDescendants()) do
-		if part:IsA("BasePart") and part.Name == "HumanoidRootPart" then
-			local d = (part.Position - charRoot.Position).Magnitude
-			if d <= radius then
-				local model = part:FindFirstAncestorOfClass("Model")
-				if model and not seen[model] then
-					seen[model] = true
-					if self:ValidTarget(model) and d < bestDistance then
-						best = model
-						bestDistance = d
-					end
-				end
+	if not self.RootIndex then
+		local roots = setmetatable({}, { __mode = "k" })
+		self.RootIndex = roots
+		local function addRoot(part)
+			if part:IsA("BasePart") and part.Name == "HumanoidRootPart" then
+				roots[part] = true
 			end
 		end
+		self.RootAdded = workspace.DescendantAdded:Connect(addRoot)
+		self.RootRemoved = workspace.DescendantRemoving:Connect(function(part)
+			roots[part] = nil
+		end)
+		-- One initial scan, then maintain only the small set of character roots.
+		for _, part in ipairs(workspace:GetDescendants()) do addRoot(part) end
 	end
+
+	local radius = math.max(1, tonumber(self.Radius) or 300)
+	local best, bestDistance = nil, radius
+	for part in pairs(self.RootIndex) do
+		if part.Parent then
+			local distance = (part.Position - charRoot.Position).Magnitude
+			if distance <= bestDistance then
+				local model = part:FindFirstAncestorOfClass("Model")
+				if self:ValidTarget(model) then
+					best, bestDistance = model, distance
+				end
+			end
+		else
+			self.RootIndex[part] = nil
+		end
+	end
+	self.CachedCandidate = best
 	return best
 end
 
@@ -8173,6 +8580,7 @@ end
 
 Farm.StopDungeonCombat = function()
 	local mode = Farm.Dungeon
+	mode:StopTargetIndex()
 	if not mode.Enabled then return end
 	mode:ClearIsolation()
 	mode.Enabled = false
@@ -8187,12 +8595,7 @@ function Farm.Dungeon:SetEnabled(on)
 	if on == self.Enabled then return end
 	if not on then Farm.StopDungeonCombat(); farmSet(false, true); return end
 	local char = player.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not root or not hum or hum.Health <= 0 then
-		if self.Setter then self.Setter(false, false) end
-		return
-	end
+	-- Enabling during respawn is allowed; CombatRuntime waits for a living character.
 	farmSet(false)
 	if BettyQuest.Enabled then BettyQuest:SetEnabled(false) end
 	self.Saved = { BossEnabled = Farm.BossEnabled, AutoQuest = Farm.AutoQuest, AutoAttack = Farm.AutoAttack }
@@ -8208,7 +8611,10 @@ function Farm.Dungeon:SetEnabled(on)
 	self.Enabled = true
 end
 
-gui.Destroying:Connect(function() Farm.Dungeon:SetEnabled(false) end)
+gui.Destroying:Connect(function()
+	Farm.Dungeon:StopTargetIndex()
+	Farm.Dungeon:SetEnabled(false)
+end)
 
 Farm.Dungeon.AutoSkip = false
 Farm.Dungeon.NextSkipAt = 0
@@ -8259,6 +8665,8 @@ function Farm.Dungeon:FindKillAuraTargets()
 end
 
 function Farm.Dungeon:StepKillAura()
+	-- Fast Attack already owns the same signal. Never run a second sender.
+	if Farm.FastAttack or not self.Enabled or not CombatRuntime:CombatReady() then return end
 	if not self.KillAura or not gui.Parent or _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN then return end
 	local now = os.clock()
 	if now < (self.KillAuraNextAt or 0) then return end
@@ -8316,6 +8724,7 @@ function Farm.Dungeon:StepKillAura()
 	-- A second pulse with a tiny gap is more reliable than six calls in one frame
 	-- on servers that debounce Combat_Service.
 	task.delay(0.025, function()
+		if Farm.FastAttack or not CombatRuntime:CombatReady() or Farm._skillHeld then return end
 		if not self.KillAura or not self.Enabled then return end
 		if Farm._target ~= locked or not locked.Parent then return end
 		local hum = locked:FindFirstChildWhichIsA("Humanoid", true)
@@ -8666,8 +9075,8 @@ local function BuildFarmPage(L, R)
 		Slider(R, "ระยะโจมตี", "ระยะเริ่มตี • เซิร์ฟเวอร์เป็นผู้ตรวจว่าตีโดน", 5, 25, Farm.AttackRange, " st", function(val)
 			Farm.AttackRange = val
 		end)
-		Slider(R, "Depth Under", "ระยะใต้ตัวมอน (แนะนำ 2)", 1, 4, 2, " st", function(val)
-			Farm.Depth = val
+		Slider(R, "Height Above Head", "อยู่เหนือหัวมอนแล้วตีลงมา ไม่วาปหนี", 1, 8, Farm.HeadHeight, " st", function(val)
+			Farm.HeadHeight = val
 		end)
 		Toggle(R, "Counter Attack When Hit", Farm.CounterAttackOnHit, function(on)
 			Farm.CounterAttackOnHit = on
@@ -8676,16 +9085,6 @@ local function BuildFarmPage(L, R)
 				DamageBlock:Release()
 				FarmRetreat:Clear()
 			end
-		end)
-		Slider(R, "Hits before dodge", "จำนวนครั้งที่อาวุธตีครบก่อนวาปลงดิน", 1, 12, Farm.ComboHits, " hit", function(val)
-			Farm.ComboHits = math.floor(val + 0.5)
-			if Farm.ResetCombo then Farm.ResetCombo() end
-		end)
-		Slider(R, "Underground depth", "ความลึกตอนวาปลงดินเพื่อหลบ", 6, 150, Farm.DamageDodgeDepth, " st", function(val)
-			Farm.DamageDodgeDepth = val
-		end)
-		Slider(R, "Underground time", "ครบ Hit → หลบใต้ดิน → กลับมาตีต่อ", 0.5, 5, Farm.ComboRetreatDelay, " s", function(val)
-			Farm.ComboRetreatDelay = math.floor(val * 10 + 0.5) / 10
 		end)
 
 		local _, _, bossFarmSetter = Section(L, "ฟาร์มบอส (เปิด/ปิด)", false, function(on)
@@ -8766,8 +9165,52 @@ local function BuildFarmPage(L, R)
 		BuildMultiBossPanel(L, statusLbl, getBossSelection, setBossFarmToggle, setNormalFarmToggle)
 		MobileUI:TagMenuItems(L, "Boss")
 
-		Slider(R, "ความเร็วโจมตี", "ไม่รบกวนเมนูและช่องพิมพ์", 25, 100, 25, " ms", function(val)
+		CombatRuntime.PerfLabel = label(R, "FPS / การโจมตี • รอเปิด Auto Attack", 11, T.Sub,
+			Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 42))
+		CombatRuntime.PerfLabel.TextWrapped = true
+		Toggle(R, "Fast Attack", Farm.FastAttack, function(on)
+			Farm.FastAttack = on
+			CombatRuntime.PreferredDriver = nil
+			CombatRuntime:Release()
+			CombatRuntime:ResetProgress()
+			CombatRuntime.NextAttackAt = 0
+			if on and Farm.BypassComboGate then
+				CombatRuntime:BindGameComboGate()
+			else
+				CombatRuntime:UnbindGameComboGate()
+			end
+		end)
+		Toggle(R, "Continuous Combo Reset", Farm.BypassComboGate, function(on)
+			Farm.BypassComboGate = on
+			if on then
+				CombatRuntime:BindGameComboGate()
+				CombatRuntime.NextAttackAt = 0
+			else
+				CombatRuntime:UnbindGameComboGate()
+			end
+		end)
+		Toggle(R, "Combat Trace (manual M1)", false, function(on)
+			CombatTrace.Enabled = on
+			CombatTrace.ManualClicks = 0
+			CombatTrace.Lines = {}
+			_G.__MAZX_COMBAT_TRACE = ""
+			if on then CombatTrace:Push("TRACE ON • กด M1 เอง 5 ครั้งติด แล้วหยุดรอ 1.5 วิ") end
+		end)
+		Toggle(R, "No Swing Animation", Farm.NoSwingAnimation, function(on)
+			Farm.NoSwingAnimation = on
+			if not on then CombatRuntime:RestoreSwingAnimations() end
+		end)
+		Toggle(R, "Adaptive Fast Attack", Farm.AdaptiveFastAttack, function(on)
+			Farm.AdaptiveFastAttack = on
+			CombatRuntime.AdaptiveInterval = math.clamp(Farm.AttackInterval, 0.005, 0.08)
+			CombatRuntime.NoDamageAttempts = 0
+		end)
+		Slider(R, "ความเร็วโจมตี", "Burst attack • 5-80 ms ต่อรอบ", 5, 80, Farm.AttackInterval * 1000, " ms", function(val)
 			Farm.AttackInterval = val / 1000
+			CombatRuntime.AdaptiveInterval = math.clamp(Farm.AttackInterval, 0.005, 0.08)
+		end)
+		Slider(R, "จำนวน Hit ต่อรอบ", "Fast Attack burst • 1-10 hit", 1, 10, Farm.BurstHits, " hit", function(val)
+			Farm.BurstHits = math.floor(val + 0.5)
 		end)
 		MobileUI:TagMenuItems(R, "Shared")
 end
@@ -8877,6 +9320,8 @@ MobileUI.MenuGroups = {
 }
 
 function MobileUI:SelectMenuTab(entry)
+	-- Never carry an expanded dropdown into another Farm/Boss tab.
+	if self.ActiveDropdownClose then self.ActiveDropdownClose() end
 	for name, page in pairs(pages) do page.Visible = name == entry[2] end
 	local columns = self.Pages[entry[2]]
 	if not columns then return end
@@ -9383,6 +9828,9 @@ end
 local function setOpen(state)
 	isOpen = state
 	MobileUI:CancelDrags()
+	if not state and MobileUI.ActiveDropdownClose then
+		MobileUI.ActiveDropdownClose()
+	end
 	if state then
 		MobileUI:Layout(false)
 		Appearance:SetOpacity(Appearance.Opacity)
