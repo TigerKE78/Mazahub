@@ -2214,6 +2214,116 @@ end)
 --------------------------------------------------------------
 -- FARM MODULE
 --------------------------------------------------------------
+-- Reversible low graphics. Work is batched, never a full-world scan per frame.
+MobileUI.LowGraphics = {
+	Enabled = false, Saved = setmetatable({}, { __mode = "k" }),
+	Seen = setmetatable({}, { __mode = "k" }), Queue = {}, Head = 1, Tail = 0, Connections = {},
+}
+function MobileUI.LowGraphics:Save(object, property, value)
+	pcall(function()
+		local current = object[property]
+		if current == value then return end
+		local properties = self.Saved[object] or {}
+		if not properties[property] then properties[property] = { Original = current, Applied = value } end
+		object[property] = value
+		self.Saved[object] = properties
+	end)
+end
+function MobileUI.LowGraphics:Apply(object)
+	if object:IsA("BasePart") then
+		self:Save(object, "CastShadow", false)
+		self:Save(object, "Reflectance", 0)
+		self:Save(object, "Material", Enum.Material.SmoothPlastic)
+	end
+	if object:IsA("MeshPart") then
+		self:Save(object, "TextureID", "")
+		self:Save(object, "RenderFidelity", Enum.RenderFidelity.Performance)
+	elseif object:IsA("SpecialMesh") then
+		self:Save(object, "TextureId", "")
+	elseif object:IsA("Decal") or object:IsA("Texture") then
+		self:Save(object, "Transparency", 1)
+	elseif object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Beam")
+		or object:IsA("Fire") or object:IsA("Smoke") or object:IsA("Sparkles")
+		or object:IsA("PostEffect") then
+		if object.Name ~= "LuminFullBright" then self:Save(object, "Enabled", false) end
+	elseif object:IsA("Light") then
+		self:Save(object, "Shadows", false)
+	elseif object:IsA("Clouds") then
+		self:Save(object, "Enabled", false)
+	end
+end
+function MobileUI.LowGraphics:Restore(object)
+	local properties = self.Saved[object]
+	self.Saved[object] = nil
+	for property, saved in pairs(properties or {}) do
+		pcall(function()
+			-- Do not overwrite a newer setting made by another system.
+			if object[property] == saved.Applied then object[property] = saved.Original end
+		end)
+	end
+end
+function MobileUI.LowGraphics:Enqueue(object, expand)
+	if not self.Enabled then return end
+	self.Tail += 1
+	self.Queue[self.Tail] = { object, expand }
+	self:Wake()
+end
+function MobileUI.LowGraphics:Step()
+	local deadline = os.clock() + 0.002
+	for _ = 1, 80 do
+		if self.Enabled then
+			local entry = self.Queue[self.Head]
+			if not entry then break end
+			self.Queue[self.Head] = nil
+			self.Head += 1
+			local object = entry[1]
+			if object.Parent and not self.Seen[object] then
+				self.Seen[object] = true
+				self:Apply(object)
+			end
+			if object.Parent and entry[2] then
+				for _, child in ipairs(object:GetChildren()) do self:Enqueue(child, true) end
+			end
+		else
+			local object = next(self.Saved)
+			if not object then break end
+			self:Restore(object)
+		end
+		if os.clock() >= deadline then break end
+	end
+	if (self.Enabled and self.Head > self.Tail) or (not self.Enabled and not next(self.Saved)) then
+		self.Queue, self.Head, self.Tail = {}, 1, 0
+		if self.Worker then self.Worker:Disconnect(); self.Worker = nil end
+	end
+end
+function MobileUI.LowGraphics:Wake()
+	if self.Worker then return end
+	self.Worker = RunService.Heartbeat:Connect(function() self:Step() end)
+end
+function MobileUI.LowGraphics:SetEnabled(on)
+	if self.Enabled == on then return end
+	self.Enabled = on
+	for _, connection in ipairs(self.Connections) do connection:Disconnect() end
+	self.Connections = {}
+	self.Queue, self.Head, self.Tail = {}, 1, 0
+	self.Seen = setmetatable({}, { __mode = "k" })
+	if on then
+		self:Save(Lighting, "GlobalShadows", false)
+		for _, root in ipairs({ workspace, Lighting }) do
+			table.insert(self.Connections, root.DescendantAdded:Connect(function(object) self:Enqueue(object, false) end))
+			self:Enqueue(root, true)
+		end
+	else
+		self:Wake()
+	end
+end
+gui.Destroying:Connect(function()
+	local mode = MobileUI.LowGraphics
+	mode:SetEnabled(false)
+	if mode.Worker then mode.Worker:Disconnect(); mode.Worker = nil end
+	while next(mode.Saved) do mode:Restore(next(mode.Saved)) end
+end)
+
 local Farm = {
 	Enabled        = false,
 	MobName        = nil,
@@ -3326,17 +3436,11 @@ function FarmRetreat:LeaveUnderground()
 	local saved = self.Underground
 	self.Underground = nil
 	if not saved or not saved.Root.Parent then return end
-	if player.Character == saved.Character and saved.Humanoid.Health > 0 then
+
+	-- Legacy damage/sky retreat is removed. Never teleport the character
+	-- when clearing an old Sky retreat state.
+	if not saved.Sky and player.Character == saved.Character and saved.Humanoid.Health > 0 then
 		pcall(function()
-			if saved.Sky then
-				local target = self.Threat
-				local targetHum = target and target.Parent and target:FindFirstChildWhichIsA("Humanoid", true)
-				local part = target and target.Parent and (target:FindFirstChild("Head", true) or target:FindFirstChild("HumanoidRootPart", true))
-				if targetHum and targetHum.Health > 0 and part and part:IsA("BasePart") then
-					local height = math.clamp(tonumber(Farm.HeadHeight) or 3, 1, math.max(1.5, tonumber(Farm.AttackRange) or 12) - 0.5)
-					saved.ReturnCFrame = CFrame.new(part.Position + Vector3.new(0, height, 0)) * saved.ReturnCFrame.Rotation
-				end
-			end
 			saved.Root.CFrame = saved.ReturnCFrame
 			saved.Root.AssemblyLinearVelocity = Vector3.zero
 			saved.Root.AssemblyAngularVelocity = Vector3.zero
@@ -3427,25 +3531,6 @@ function FarmRetreat:FindUndergroundPosition(char, root, hum, target)
 	return CFrame.lookAt(position, position + forward), CFrame.lookAt(returnPosition, returnPosition + forward)
 end
 
-function FarmRetreat:BeginDamage(char, root, hum, target)
-	-- Damage retreat is automatic while farming; combo retreat is independent.
-	if not Farm.Enabled or hum.Health <= 0 or self.Until > os.clock() then return end
-	local now = os.clock()
-	local returnCf = root.CFrame
-	local destination = CFrame.new(root.Position + Vector3.new(0, 60, 0)) * returnCf.Rotation
-	self.StartedAt, self.MaxUntil, self.Until = now, now + 2, now + 2
-	self.Underground = { Character = char, Root = root, Humanoid = hum,
-		Anchored = root.Anchored, ReturnCFrame = returnCf, Sky = true }
-	self.Threat, self.Position = target, destination
-	Farm._attackTarget = nil
-	DamageBlock:Release()
-	if Farm.ReleaseInputs then Farm.ReleaseInputs() end
-	root.Anchored = true
-	root.CFrame = destination
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
-end
-
 function FarmRetreat:Watch()
 	local char = player.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3453,22 +3538,10 @@ function FarmRetreat:Watch()
 	self:Stop()
 	self.Humanoid = hum
 	if not hum then return end
-	local lastHealth = hum.Health
 	self.Connection = hum.HealthChanged:Connect(function(health)
-		local damaged = health < lastHealth
-		lastHealth = health
+		if player.Character ~= char then return end
+		-- Taking damage must NEVER move/teleport the player. Only death cleans up.
 		if health <= 0 then self:Clear(); Farm._attackTarget = nil; return end
-		if not damaged or not Farm.Enabled or Farm._questBusy or Farm._lootBusy or Farm._bettyBusy or Farm._storyBusy or Farm._deliveryBusy or Farm._pagesBusy or Farm._bearBusy then return end
-		if _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN or player.Character ~= char then return end
-		if Farm.InputBlocked and Farm.InputBlocked() then return end
-
-		local now = os.clock()
-		local retreating = self.Until > now
-		local target = retreating and self.Threat or Farm._attackTarget or Farm._target
-		local root = char:FindFirstChild("HumanoidRootPart")
-		if not target or not target.Parent or not root then return end
-		local ok, err = pcall(function() self:BeginDamage(char, root, hum, target) end)
-		if not ok then self:Clear(); Farm._lastRuntimeError = tostring(err) end
 	end)
 end
 
@@ -3517,14 +3590,28 @@ end
 
 function FarmRetreat:Step()
 	self:Watch()
-	local sky = self.Underground and self.Underground.Sky
-	if Farm.Dungeon and Farm.Dungeon.Enabled and not sky then
-		-- Clear any retreat that may have started before Dungeon was enabled.
+
+	-- Kill any legacy Sky retreat state without moving the character.
+	if self.Underground and self.Underground.Sky then
+		local saved = self.Underground
+		self.Underground = nil
+		if saved.Root and saved.Root.Parent then
+			pcall(function() saved.Root.Anchored = saved.Anchored end)
+		end
+		self.Until = 0
+		self.Position = nil
+		self.Threat = nil
+		self.StartedAt, self.MaxUntil, self.NextCandidateAt = 0, 0, 0
+		return false
+	end
+
+	if Farm.Dungeon and Farm.Dungeon.Enabled then
+		-- Clear any normal combo retreat that may have started before Dungeon.
 		self:Clear()
 		DamageBlock:Release()
 		return false
 	end
-	if not Farm.Enabled or (not sky and not Farm.RetreatEnabled) or self.Until <= os.clock() then self:Clear(); return false end
+	if not Farm.Enabled or not Farm.RetreatEnabled or self.Until <= os.clock() then self:Clear(); return false end
 	if Farm.InputBlocked and Farm.InputBlocked() then self:Clear(); return false end
 	local char = player.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -3535,8 +3622,6 @@ function FarmRetreat:Step()
 	local threatHum = self.Threat and self.Threat:FindFirstChildWhichIsA("Humanoid", true)
 	if not self.Threat or not self.Threat.Parent or (threatHum and threatHum.Health <= 0) then self:Clear(); return false end
 	Farm._attackTarget = nil
-	-- Sky retreat is anchored once on entry; no repeated teleport writes.
-	if sky then return true end
 	if self.Underground then root.Anchored = true end
 	root.CFrame = self.Position
 	root.AssemblyLinearVelocity = Vector3.zero
@@ -4026,6 +4111,17 @@ local function farmMoveUnder(mob)
 	local desired = CFrame.lookAt(desiredPosition, desiredPosition - Vector3.yAxis, facing)
 	FarmCharacterState:RememberHumanoid(hum)
 	if hum.AutoRotate then hum.AutoRotate = false end
+
+	-- Do not slowly fly toward a new mob. Teleport to the farm position
+	-- immediately, then let AlignPosition only keep us attached to its head.
+	if changedTarget or (hrp.Position - desiredPosition).Magnitude > 3 then
+		pcall(function()
+			hrp.CFrame = desired
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.AssemblyAngularVelocity = Vector3.zero
+		end)
+	end
+
 	FarmCharacterState:HoldPosition(hrp, desiredPosition, desired.Rotation, targetPart)
 	FarmCharacterState.HoverTarget = mob
 	FarmCharacterState.HoverFacing = facing
@@ -4522,7 +4618,7 @@ function CombatRuntime:CombatReady()
 		or not gui.Parent or _G.__LUMIN_RUNNING ~= LUMIN_RUN_TOKEN then return false, "ฟาร์มยังไม่เปิด" end
 	if Farm._questBusy or Farm._lootBusy or Farm._bettyBusy or Farm._storyBusy
 		or Farm._deliveryBusy or Farm._pagesBusy or Farm._bearBusy then return false, "รอเควส / เก็บของ" end
-	if FarmRetreat.Until > os.clock() then return false, "รอหลบหลังโดนตี" end
+	if FarmRetreat.Until > os.clock() then return false, "รอพักหลังคอมโบ" end
 	if attackInputBlocked() then return false, "รอปิดแชต / เมนูเกม" end
 	local quest = Farm.AutoQuest and farmCurrentQuestSpec() or nil
 	if quest and (Farm._questNeeded or Farm._acceptedQuestText ~= quest.Text) then return false, "รอรับเควส" end
@@ -9101,10 +9197,10 @@ local function BuildFarmPage(L, R)
 		Slider(R, "ระยะโจมตี", "ระยะเริ่มตี • เซิร์ฟเวอร์เป็นผู้ตรวจว่าตีโดน", 5, 25, Farm.AttackRange, " st", function(val)
 			Farm.AttackRange = val
 		end)
-		Slider(R, "Height Above Head", "ลอยเหนือหัว • โดนตีหลบขึ้นฟ้า 2 วินาที", 1, 8, Farm.HeadHeight, " st", function(val)
+		Slider(R, "Height Above Head", "ลอยติดหัวมอน • ไม่วาปหนีเมื่อโดนตี", 1, 8, Farm.HeadHeight, " st", function(val)
 			Farm.HeadHeight = val
 		end)
-		label(R, "โดนตี: ขึ้นฟ้า 60 st • กลับมาตีใน 2 วินาที", 11, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 24))
+		label(R, "โดนตีแล้วลอยติดหัวมอนและตีต่อ", 11, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 24))
 
 		local _, _, bossFarmSetter = Section(L, "ฟาร์มบอส (เปิด/ปิด)", false, function(on)
 			if changingFarmMode then return end
@@ -9703,6 +9799,11 @@ for i, v in ipairs(navItems) do
 	end
 
 	if v[1] == "Setting" then
+		Section(R, "Performance / ประสิทธิภาพ", true)
+		Toggle(R, "ภาพต่ำ / FPS Boost", MobileUI.LowGraphics.Enabled, function(on)
+			MobileUI.LowGraphics:SetEnabled(on)
+		end)
+		label(R, "ลดเงา เท็กซ์เจอร์ และเอฟเฟกต์ • ปิดเพื่อคืนภาพ", 11, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 32))
 		Section(L, "ภาษา", true)
 		Dropdown(L, "ภาษาเมนู", "เปลี่ยนข้อความทุกหน้าทันที",
 			{ "ไทย / Thai", "English" }, I18N.Language == "en" and "English" or "ไทย / Thai",
