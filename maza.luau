@@ -1,7 +1,7 @@
 local MazxBoot = { Stage = "starting", Finished = false, Gui = nil, Panel = nil, Label = nil }
 
 function MazxBoot:Show(message, failed)
-	warn("[Mazxhub/android-startup-1] " .. tostring(message))
+	warn("[Mazxhub/startup-1] " .. tostring(message))
 	pcall(function()
 		local localPlayer = game:GetService("Players").LocalPlayer
 		local parent = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
@@ -43,7 +43,7 @@ function MazxBoot:Show(message, failed)
 			dismiss.Activated:Connect(function() screen:Destroy() end)
 		end
 		self.Label.TextColor3 = failed and Color3.fromRGB(255, 160, 160) or Color3.fromRGB(210, 235, 255)
-		self.Label.Text = "Mazxhub • android-startup-1\n" .. tostring(message):sub(1, 900)
+		self.Label.Text = "Mazxhub • startup-1\n" .. tostring(message):sub(1, 900)
 	end)
 end
 
@@ -137,7 +137,7 @@ local I18N = {
 }
 for _, entry in ipairs({
 	{"ฟาร์ม", "Farm"}, {"สถานะ", "Status"}, {"โลก", "World"},
-	{"ต่อสู้", "Combat"}, {"ตัวละคร", "Player"}, {"การแสดงผล", "Visuals"},
+	{"ต่อสู้", "Combat"}, {"ตัวละคร", "Player"}, {"การแสดงผล", "Visuals"}, {"สกิล", "Skill"},
 	{"การมองเห็น", "Visibility"},
 	{"เพิ่มความสว่าง • ปิดเงา • ล็อกแสงกลางวัน", "Increase brightness • disable shadows • lock daylight"},
 	{"เปิด Full Bright แล้ว", "Full Bright enabled"},
@@ -406,27 +406,27 @@ local gui = new("ScreenGui", {
 }, playerGui)
 MazxBoot.Gui = gui
 
-local MobileUI = {
-	Touch = UserInputService.TouchEnabled, Compact = false, Column = 1,
+MazxUI = {
+	Touch = false, Compact = false, Column = 1,
 	Pages = {}, Connections = {}, Drags = {}, ScrollLocks = {},
 }
-MobileUI.Surface = new("Frame", {
+MazxUI.Surface = new("Frame", {
 	Name = "SafeControls", Size = UDim2.fromScale(1, 1),
 	BackgroundTransparency = 1, BorderSizePixel = 0,
 }, gui)
 
-function MobileUI:Connect(signal, callback)
+function MazxUI:Connect(signal, callback)
 	local connection = signal:Connect(callback)
 	table.insert(self.Connections, connection)
 	return connection
 end
 
-function MobileUI:OwnsMove(held, input)
+function MazxUI:OwnsMove(held, input)
 	return held and (input == held or (held.UserInputType == Enum.UserInputType.MouseButton1
 		and input.UserInputType == Enum.UserInputType.MouseMovement))
 end
 
-function MobileUI:LockScroll(node)
+function MazxUI:LockScroll(node)
 	local locked = {}
 	while node and node ~= gui do
 		if node:IsA("ScrollingFrame") then
@@ -453,17 +453,18 @@ function MobileUI:LockScroll(node)
 	end
 end
 
-function MobileUI:CancelDrags()
+function MazxUI:CancelDrags()
 	for cancel in pairs(self.Drags) do cancel() end
 end
 
 local fab = new("ImageButton", {
 	Name = "Fab",
 	Size = UDim2.fromOffset(52, 52),
-	Position = UDim2.new(0, 28, 0.5, -26),
+	-- Start at the top-center, matching the floating avatar position in the reference.
+	Position = UDim2.new(0.5, -26, 0, 52),
 	BackgroundColor3 = T.Card, AutoButtonColor = false,
 	Image = "rbxthumb://type=AvatarHeadShot&id=" .. player.UserId .. "&w=150&h=150",
-}, MobileUI.Surface)
+}, MazxUI.Surface)
 corner(fab, 26); stroke(fab, T.Accent, 1.5)
 
 local Appearance = { Opacity = 100 }
@@ -474,7 +475,7 @@ local main = new("Frame", {
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	BackgroundColor3 = T.Bg, BackgroundTransparency = 1 - Appearance.Opacity / 100,
 	BorderSizePixel = 0, Visible = false,
-}, MobileUI.Surface)
+}, MazxUI.Surface)
 corner(main, 6); stroke(main, T.Stroke, 1)
 -- Flat, opaque panels keep the game scenery from competing with menu text.
 
@@ -523,7 +524,7 @@ new("Frame", {
 	Size = UDim2.new(1, -28, 0, 1), Position = UDim2.new(0, 14, 0, 70),
 	BackgroundColor3 = T.Stroke, BackgroundTransparency = 0.6, BorderSizePixel = 0,
 }, sidebar)
-local menuHint = label(sidebar, MobileUI.Touch and "Menu" or "RightShift", 9, T.Sub, Enum.Font.Gotham,
+local menuHint = label(sidebar, MazxUI.Touch and "Menu" or "RightShift", 9, T.Sub, Enum.Font.Gotham,
 	UDim2.new(0, 8, 1, -28), UDim2.new(1, -16, 0, 18))
 menuHint.TextXAlignment = Enum.TextXAlignment.Center
 
@@ -540,7 +541,7 @@ pad(navList, 0, 0, 10, 10)
 local pages          = {}
 local activeNavSet   = nil
 
-function MobileUI:NavIcon(parent, name)
+function MazxUI:NavIcon(parent, name)
 	local frame = new("Frame", { Size = UDim2.fromOffset(20, 20),
 		Position = UDim2.new(0.5, -10, 0, 1), BackgroundTransparency = 1 }, parent)
 	local fills, outlines = {}, {}
@@ -574,13 +575,13 @@ end
 
 local function addNav(name, icon, onSelect)
 	local b = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, MobileUI.Touch and 44 or 36),
+		Size = UDim2.new(1, 0, 0, MazxUI.Touch and 44 or 36),
 		BackgroundColor3 = T.AccentSoft, BackgroundTransparency = 1,
 		Text = "", AutoButtonColor = false,
 	}, navList)
 	corner(b, 8)
 
-	local tintIcon = MobileUI:NavIcon(b, name)
+	local tintIcon = MazxUI:NavIcon(b, name)
 	local tx = label(b, name, 10, T.Sub, Enum.Font.GothamMedium, UDim2.new(0, 2, 0, 21), UDim2.new(1, -4, 0, 13))
 	tx.TextXAlignment = Enum.TextXAlignment.Center
 
@@ -714,9 +715,9 @@ local hubName = label(top, "Mazxhub", 16, T.Accent, Enum.Font.GothamBold,
 	UDim2.new(1, -176, 0, 15), UDim2.fromOffset(120, 30))
 hubName.TextXAlignment = Enum.TextXAlignment.Right
 hubName.ZIndex = 6
-MobileUI.TechCaption = label(top, "CONTROL // PANEL", 10, T.Sub, Enum.Font.Code,
+MazxUI.TechCaption = label(top, "CONTROL // PANEL", 10, T.Sub, Enum.Font.Code,
 	UDim2.fromOffset(222, 15), UDim2.fromOffset(150, 30))
-MobileUI.TechCaption.ZIndex = 6
+MazxUI.TechCaption.ZIndex = 6
 
 local close = new("TextButton", {
 	Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, -40, 0, 16),
@@ -750,12 +751,12 @@ local function makePage(name)
 	end
 
 	pages[name] = p
-	MobileUI.Pages[name] = cols
+	MazxUI.Pages[name] = cols
 	return cols[1], cols[2]
 end
 
 local function Section(parent, title, default, cb)
-	local f = new("Frame", {Size = UDim2.new(1, 0, 0, MobileUI.Touch and 48 or 34), BackgroundColor3 = T.AccentSoft,
+	local f = new("Frame", {Size = UDim2.new(1, 0, 0, MazxUI.Touch and 48 or 34), BackgroundColor3 = T.AccentSoft,
 		BackgroundTransparency = 0.45, BorderSizePixel = 0}, parent)
 	corner(f, 5)
 
@@ -803,7 +804,7 @@ local function Section(parent, title, default, cb)
 end
 
 local function Toggle(parent, title, default, cb)
-	local f = new("Frame", {Size = UDim2.new(1, 0, 0, MobileUI.Touch and 48 or 32), BackgroundColor3 = T.Card,
+	local f = new("Frame", {Size = UDim2.new(1, 0, 0, MazxUI.Touch and 48 or 32), BackgroundColor3 = T.Card,
 		BackgroundTransparency = 0.65, BorderSizePixel = 0}, parent)
 	corner(f, 5)
 	label(f, title, 12, T.Text, Enum.Font.GothamMedium, UDim2.new(0, 12, 0, 0), UDim2.new(1, -76, 1, 0))
@@ -836,8 +837,8 @@ end
 
 local function Slider(parent, title, desc, min, max, default, suffix, cb)
 	local hasDesc = type(desc) == "string" and desc ~= ""
-	local frameHeight = MobileUI.Touch and (hasDesc and 82 or 62) or (hasDesc and 58 or 44)
-	local trackY = MobileUI.Touch and (hasDesc and 56 or 38) or (hasDesc and 44 or 30)
+	local frameHeight = MazxUI.Touch and (hasDesc and 82 or 62) or (hasDesc and 58 or 44)
+	local trackY = MazxUI.Touch and (hasDesc and 56 or 38) or (hasDesc and 44 or 30)
 	local f = new("Frame", {Size = UDim2.new(1, 0, 0, frameHeight), BackgroundTransparency = 1}, parent)
 
 	label(f, title, 12.5, T.Text, Enum.Font.GothamBold, UDim2.new(0, 0, 0, 0), UDim2.new(1, -70, 0, 16))
@@ -872,7 +873,7 @@ local function Slider(parent, title, desc, min, max, default, suffix, cb)
 	set(default)
 
 	local hit = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, MobileUI.Touch and 44 or 24), Position = UDim2.new(0, 0, 0, MobileUI.Touch and -19 or -9),
+		Size = UDim2.new(1, 0, 0, MazxUI.Touch and 44 or 24), Position = UDim2.new(0, 0, 0, MazxUI.Touch and -19 or -9),
 		BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
 	}, track)
 
@@ -882,8 +883,8 @@ local function Slider(parent, title, desc, min, max, default, suffix, cb)
 		if unlockScroll then unlockScroll(); unlockScroll = nil end
 		if knob.Parent then tween(knob, {Size = UDim2.fromOffset(14, 14)}) end
 	end
-	MobileUI.Drags[cancel] = true
-	f.Destroying:Connect(function() cancel(); MobileUI.Drags[cancel] = nil end)
+	MazxUI.Drags[cancel] = true
+	f.Destroying:Connect(function() cancel(); MazxUI.Drags[cancel] = nil end)
 	local function move(x)
 		local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
 		set(min + (max - min) * a)
@@ -894,16 +895,16 @@ local function Slider(parent, title, desc, min, max, default, suffix, cb)
 		if i.UserInputType == Enum.UserInputType.MouseButton1
 		or i.UserInputType == Enum.UserInputType.Touch then
 			dragging = i
-			unlockScroll = MobileUI:LockScroll(f.Parent)
+			unlockScroll = MazxUI:LockScroll(f.Parent)
 			move(i.Position.X)
 			tween(knob, {Size = UDim2.fromOffset(18, 18)})
 		end
 	end)
 
-	MobileUI:Connect(UserInputService.InputChanged, function(i)
-		if MobileUI:OwnsMove(dragging, i) then move(i.Position.X) end
+	MazxUI:Connect(UserInputService.InputChanged, function(i)
+		if MazxUI:OwnsMove(dragging, i) then move(i.Position.X) end
 	end)
-	MobileUI:Connect(UserInputService.InputEnded, function(i)
+	MazxUI:Connect(UserInputService.InputEnded, function(i)
 		if i == dragging then cancel() end
 	end)
 
@@ -912,7 +913,7 @@ end
 
 local function Dropdown(parent, title, desc, options, default, cb)
 	local hasDesc = type(desc) == "string" and desc ~= ""
-	local BASE = MobileUI.Touch and (hasDesc and 86 or 68) or (hasDesc and 74 or 56)
+	local BASE = MazxUI.Touch and (hasDesc and 86 or 68) or (hasDesc and 74 or 56)
 	local buttonY = hasDesc and 40 or 22
 	local selectedOption = default
 	local f = new("Frame", {Size = UDim2.new(1, 0, 0, BASE), BackgroundTransparency = 1}, parent)
@@ -923,7 +924,7 @@ local function Dropdown(parent, title, desc, options, default, cb)
 	end
 
 	local btn = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, MobileUI.Touch and 44 or 32), Position = UDim2.new(0, 0, 0, buttonY),
+		Size = UDim2.new(1, 0, 0, MazxUI.Touch and 44 or 32), Position = UDim2.new(0, 0, 0, buttonY),
 		BackgroundColor3 = T.Card, Text = "", AutoButtonColor = false,
 	}, f)
 	corner(btn, 8); stroke(btn)
@@ -931,8 +932,8 @@ local function Dropdown(parent, title, desc, options, default, cb)
 	local arrow = label(btn, "⌄", 15, T.Sub, Enum.Font.GothamBold, UDim2.new(1, -26, 0, -4), UDim2.new(0, 16, 1, 0))
 	arrow.TextXAlignment = Enum.TextXAlignment.Center
 
-	local ITEM_H = MobileUI.Touch and 45 or 27
-	local MAX_VISIBLE = MobileUI.Touch and 4 or 8
+	local ITEM_H = MazxUI.Touch and 45 or 27
+	local MAX_VISIBLE = MazxUI.Touch and 4 or 8
 
 	local menu = new("ScrollingFrame", {
 		Size = UDim2.new(1, 0, 0, 0), Position = UDim2.new(0, 0, 0, BASE + 2),
@@ -949,15 +950,15 @@ local function Dropdown(parent, title, desc, options, default, cb)
 	local open = false
 	local closeMenu
 	local function setOpen(state)
-		if state and MobileUI.ActiveDropdownClose and MobileUI.ActiveDropdownClose ~= closeMenu then
-			MobileUI.ActiveDropdownClose()
+		if state and MazxUI.ActiveDropdownClose and MazxUI.ActiveDropdownClose ~= closeMenu then
+			MazxUI.ActiveDropdownClose()
 		end
 		open = state
 		if open then
-			MobileUI.ActiveDropdownClose = closeMenu
+			MazxUI.ActiveDropdownClose = closeMenu
 			menu.Visible = true
-		elseif MobileUI.ActiveDropdownClose == closeMenu then
-			MobileUI.ActiveDropdownClose = nil
+		elseif MazxUI.ActiveDropdownClose == closeMenu then
+			MazxUI.ActiveDropdownClose = nil
 		end
 		local h = math.min(#options, MAX_VISIBLE) * ITEM_H + 8
 		tween(menu,  {Size = UDim2.new(1, 0, 0, open and h or 0)})
@@ -1016,7 +1017,7 @@ end
 -- This avoids Luau's 200-local-register limit when Farm UI grows.
 local function SearchDropdownFilter(parent, placeholder, sourceList, getCurrent, setOptions, onSelected, statusLbl, noun)
 	local row = new("Frame", {
-		Size = UDim2.new(1, 0, 0, MobileUI.Touch and 48 or 38),
+		Size = UDim2.new(1, 0, 0, MazxUI.Touch and 48 or 38),
 		BackgroundTransparency = 1,
 	}, parent)
 	local box = new("TextBox", {
@@ -1082,7 +1083,7 @@ local function ColorRow(parent, title, hex, color, cb)
 	local hexLbl = label(f, hex, 11, T.Sub, Enum.Font.Gotham, UDim2.new(0, 0, 0, 23), UDim2.new(1, -70, 0, 14))
 
 	local sw = new("TextButton", {
-		Size = UDim2.fromOffset(52, MobileUI.Touch and 44 or 26), Position = UDim2.new(1, -52, 0.5, MobileUI.Touch and -22 or -13),
+		Size = UDim2.fromOffset(52, MazxUI.Touch and 44 or 26), Position = UDim2.new(1, -52, 0.5, MazxUI.Touch and -22 or -13),
 		BackgroundColor3 = color, Text = "", AutoButtonColor = false,
 	}, f)
 	corner(sw, 13); stroke(sw, T.Stroke, 1.5)
@@ -1094,19 +1095,19 @@ local function ColorRow(parent, title, hex, color, cb)
 end
 
 local function Keybind(parent, title, defaultKey, cb)
-	local f = new("Frame", {Size = UDim2.new(1, 0, 0, MobileUI.Touch and 48 or 34), BackgroundTransparency = 1}, parent)
+	local f = new("Frame", {Size = UDim2.new(1, 0, 0, MazxUI.Touch and 48 or 34), BackgroundTransparency = 1}, parent)
 	label(f, title, 12.5, T.Sub, Enum.Font.GothamMedium, UDim2.new(0, 0, 0, 0), UDim2.new(1, -80, 1, 0))
 
 	local btn = new("TextButton", {
-		Size = UDim2.fromOffset(80, MobileUI.Touch and 44 or 26), Position = UDim2.new(1, -80, 0.5, MobileUI.Touch and -22 or -13),
-		BackgroundColor3 = T.Card, Text = MobileUI.Touch and not UserInputService.KeyboardEnabled and "ใช้ปุ่มลอย" or defaultKey.Name, TextColor3 = T.Text,
+		Size = UDim2.fromOffset(80, MazxUI.Touch and 44 or 26), Position = UDim2.new(1, -80, 0.5, MazxUI.Touch and -22 or -13),
+		BackgroundColor3 = T.Card, Text = MazxUI.Touch and not UserInputService.KeyboardEnabled and "ใช้ปุ่มลอย" or defaultKey.Name, TextColor3 = T.Text,
 		TextSize = 11, Font = Enum.Font.GothamMedium, AutoButtonColor = false,
 	}, f)
 	corner(btn, 7); stroke(btn)
 
 	local key, listening = defaultKey, false
 	btn.Activated:Connect(function()
-		if MobileUI.Touch and not UserInputService.KeyboardEnabled then
+		if MazxUI.Touch and not UserInputService.KeyboardEnabled then
 			btn.Text = "ใช้ปุ่มลอย"
 			return
 		end
@@ -1115,7 +1116,7 @@ local function Keybind(parent, title, defaultKey, cb)
 		tween(btn, {BackgroundColor3 = T.Accent})
 	end)
 
-	MobileUI:Connect(UserInputService.InputBegan, function(i, gp)
+	MazxUI:Connect(UserInputService.InputBegan, function(i, gp)
 		if listening and not gp and i.UserInputType == Enum.UserInputType.Keyboard then
 			listening = false
 			key = i.KeyCode
@@ -1132,7 +1133,7 @@ local function Button(parent, title, color, cb)
 	local background = color or T.Accent
 	local bright = (background.R * 0.299 + background.G * 0.587 + background.B * 0.114) > 0.6
 	local b = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, MobileUI.Touch and 48 or 40),
+		Size = UDim2.new(1, 0, 0, MazxUI.Touch and 48 or 40),
 		BackgroundColor3 = background,
 		Text = title, TextColor3 = bright and T.Ink or T.Text, TextSize = 12.5,
 		Font = Enum.Font.GothamBold, AutoButtonColor = false,
@@ -2216,11 +2217,11 @@ end)
 -- FARM MODULE
 --------------------------------------------------------------
 -- Reversible low graphics. Work is batched, never a full-world scan per frame.
-MobileUI.LowGraphics = {
+MazxUI.LowGraphics = {
 	Enabled = false, Saved = setmetatable({}, { __mode = "k" }),
 	Seen = setmetatable({}, { __mode = "k" }), Queue = {}, Head = 1, Tail = 0, Connections = {},
 }
-function MobileUI.LowGraphics:Save(object, property, value)
+function MazxUI.LowGraphics:Save(object, property, value)
 	pcall(function()
 		local current = object[property]
 		if current == value then return end
@@ -2230,7 +2231,7 @@ function MobileUI.LowGraphics:Save(object, property, value)
 		self.Saved[object] = properties
 	end)
 end
-function MobileUI.LowGraphics:Apply(object)
+function MazxUI.LowGraphics:Apply(object)
 	if object:IsA("BasePart") then
 		self:Save(object, "CastShadow", false)
 		self:Save(object, "Reflectance", 0)
@@ -2253,7 +2254,7 @@ function MobileUI.LowGraphics:Apply(object)
 		self:Save(object, "Enabled", false)
 	end
 end
-function MobileUI.LowGraphics:Restore(object)
+function MazxUI.LowGraphics:Restore(object)
 	local properties = self.Saved[object]
 	self.Saved[object] = nil
 	for property, saved in pairs(properties or {}) do
@@ -2263,13 +2264,13 @@ function MobileUI.LowGraphics:Restore(object)
 		end)
 	end
 end
-function MobileUI.LowGraphics:Enqueue(object, expand)
+function MazxUI.LowGraphics:Enqueue(object, expand)
 	if not self.Enabled then return end
 	self.Tail += 1
 	self.Queue[self.Tail] = { object, expand }
 	self:Wake()
 end
-function MobileUI.LowGraphics:Step()
+function MazxUI.LowGraphics:Step()
 	local deadline = os.clock() + 0.002
 	for _ = 1, 80 do
 		if self.Enabled then
@@ -2297,11 +2298,11 @@ function MobileUI.LowGraphics:Step()
 		if self.Worker then self.Worker:Disconnect(); self.Worker = nil end
 	end
 end
-function MobileUI.LowGraphics:Wake()
+function MazxUI.LowGraphics:Wake()
 	if self.Worker then return end
 	self.Worker = RunService.Heartbeat:Connect(function() self:Step() end)
 end
-function MobileUI.LowGraphics:SetEnabled(on)
+function MazxUI.LowGraphics:SetEnabled(on)
 	if self.Enabled == on then return end
 	self.Enabled = on
 	for _, connection in ipairs(self.Connections) do connection:Disconnect() end
@@ -2319,7 +2320,7 @@ function MobileUI.LowGraphics:SetEnabled(on)
 	end
 end
 gui.Destroying:Connect(function()
-	local mode = MobileUI.LowGraphics
+	local mode = MazxUI.LowGraphics
 	mode:SetEnabled(false)
 	if mode.Worker then mode.Worker:Disconnect(); mode.Worker = nil end
 	while next(mode.Saved) do mode:Restore(next(mode.Saved)) end
@@ -2331,9 +2332,12 @@ local Farm = {
 	BossEnabled    = false,
 	BossName       = "Zuko",
 	MultiBossEnabled = false,
+	MultiBossMode = nil,
 	MultiBossSelected = {},
 	MultiBossOrder = {},
 	MultiBossIndex = 1,
+	BossAllEnabled = false,
+	BossAllSelected = {},
 	_multiBossPendingAdvance = nil,
 	_multiBossDeathConn = nil,
 	_multiBossSaved = nil,
@@ -2871,7 +2875,8 @@ local function farmMultiBossAdvance(deadName)
 	Farm._multiBossPendingAdvance = nil
 	farmMultiBossDisconnectDeath()
 	if Farm.MultiBossLabel and Farm.MultiBossLabel.Parent then
-		Farm.MultiBossLabel.Text = "Multi Boss • ไปตี " .. tostring(Farm.BossName)
+		local prefix = Farm.MultiBossMode == "all" and "Farm Boss All" or "Multi Boss"
+		Farm.MultiBossLabel.Text = prefix .. " • ไปตี " .. tostring(Farm.BossName)
 		Farm.MultiBossLabel.TextColor3 = T.Mint
 	end
 	print("[Mazxhub MultiBoss] next -> " .. tostring(Farm.BossName))
@@ -4820,7 +4825,7 @@ end
 
 function CombatRuntime:ResetProgress()
 	if Farm.ResetCombo then Farm.ResetCombo() end
-	self.Driver = Farm.FastAttack and 1 or (self.PreferredDriver or (UserInputService.TouchEnabled and 2 or 1))
+	self.Driver = Farm.FastAttack and 1 or (self.PreferredDriver or 1)
 	self.DriverAttempts = 0
 	self.DriverHasDamage = false
 	self.LastHealth, self.LastSwingAt = nil, 0
@@ -4836,7 +4841,7 @@ function CombatRuntime:NextDriver()
 		self.Driver = 1
 		return
 	end
-	self.Driver = UserInputService.TouchEnabled and (self.Driver == 2 and 3 or 2) or (self.Driver % 3 + 1)
+	self.Driver = self.Driver % 3 + 1
 end
 
 function CombatRuntime:TargetAlive(target)
@@ -5542,7 +5547,8 @@ function CombatRuntime:Step()
 					farmMultiBossDisconnectDeath()
 					self.TargetKey = "boss:" .. name
 					if Farm.MultiBossLabel and Farm.MultiBossLabel.Parent then
-						Farm.MultiBossLabel.Text = "Multi Boss • ไปตี " .. name
+						local prefix = Farm.MultiBossMode == "all" and "Farm Boss All" or "Multi Boss"
+						Farm.MultiBossLabel.Text = prefix .. " • ไปตี " .. name
 					end
 					break
 				end
@@ -5697,7 +5703,7 @@ local function farmSetMultiBoss(on, keepCurrentMode)
 	on = on == true
 	if on then
 		if Farm.MultiBossEnabled then return true end
-		if #Farm.MultiBossOrder < 2 then return false, "เลือกบอสอย่างน้อย 2 ตัว" end
+		if #Farm.MultiBossOrder < 1 then return false, "เลือกบอสอย่างน้อย 1 ตัว" end
 
 		if Farm.StopRaidChest then Farm.StopRaidChest() end
 		if Farm.StopPages then Farm.StopPages() end
@@ -5711,18 +5717,27 @@ local function farmSetMultiBoss(on, keepCurrentMode)
 			AutoQuest = Farm.AutoQuest,
 		}
 		farmSet(false, true)
+		Farm.MultiBossMode = Farm.MultiBossMode or "multi"
+		Farm.BossAllEnabled = Farm.MultiBossMode == "all"
 		Farm.MultiBossEnabled = true
-		Farm.MultiBossIndex = 1
+		Farm.MultiBossIndex = math.clamp(Farm.MultiBossIndex or 1, 1, #Farm.MultiBossOrder)
 		Farm._multiBossPendingAdvance = nil
 		farmMultiBossDisconnectDeath()
 		Farm.BossEnabled = true
-		Farm.BossName = Farm.MultiBossOrder[1]
+		Farm.BossName = Farm.MultiBossOrder[Farm.MultiBossIndex]
 		farmSet(true, true)
 		return true
 	end
 
-	if not Farm.MultiBossEnabled then return true end
+	if not Farm.MultiBossEnabled then
+		Farm.BossAllEnabled = false
+		Farm.MultiBossMode = nil
+		return true
+	end
+	local previousMode = Farm.MultiBossMode
 	Farm.MultiBossEnabled = false
+	Farm.BossAllEnabled = false
+	Farm.MultiBossMode = nil
 	Farm._multiBossPendingAdvance = nil
 	farmMultiBossDisconnectDeath()
 	if Farm.Enabled and Farm.BossEnabled then farmSet(false, true) end
@@ -5733,8 +5748,72 @@ local function farmSetMultiBoss(on, keepCurrentMode)
 	end
 	Farm._multiBossSaved = nil
 	Farm.MultiBossIndex = 1
-	if Farm.MultiBossSetter then Farm.MultiBossSetter(false, false) end
+	if previousMode == "all" then
+		if Farm.BossAllSetter then Farm.BossAllSetter(false, false) end
+	else
+		if Farm.MultiBossSetter then Farm.MultiBossSetter(false, false) end
+	end
 	return true
+end
+local function farmBossAllSelectedOrder()
+	local order = {}
+	for _, name in ipairs(BOSS_TYPES) do
+		if Farm.BossAllSelected[name] then table.insert(order, name) end
+	end
+	return order
+end
+
+local function farmRefreshBossAllSelection()
+	local order = farmBossAllSelectedOrder()
+	if #order == 0 then return false, "ติ๊กเลือกบอสอย่างน้อย 1 ตัว" end
+
+	local currentName = Farm.BossName
+	farmMultiBossClear()
+	for _, name in ipairs(order) do farmMultiBossAdd(name) end
+
+	local currentIndex = table.find(Farm.MultiBossOrder, currentName)
+	Farm.MultiBossIndex = currentIndex or 1
+	Farm.BossName = Farm.MultiBossOrder[Farm.MultiBossIndex]
+	Farm._target = nil
+	Farm._attackTarget = nil
+	Farm._multiBossPendingAdvance = nil
+	return true
+end
+
+local function farmSetBossAll(on)
+	on = on == true
+	if on then
+		local order = farmBossAllSelectedOrder()
+		if #order == 0 then return false, "ติ๊กเลือกบอสอย่างน้อย 1 ตัว" end
+
+		if Farm.MultiBossEnabled then
+			farmSetMultiBoss(false, true)
+		end
+		farmMultiBossClear()
+		for _, name in ipairs(order) do farmMultiBossAdd(name) end
+		Farm.MultiBossMode = "all"
+		Farm.BossAllEnabled = true
+		local ok, err = farmSetMultiBoss(true)
+		if not ok then
+			Farm.BossAllEnabled = false
+			Farm.MultiBossMode = nil
+			return false, err
+		end
+		return true
+	end
+
+	if Farm.MultiBossEnabled and Farm.MultiBossMode == "all" then
+		return farmSetMultiBoss(false)
+	end
+	Farm.BossAllEnabled = false
+	if Farm.BossAllSetter then Farm.BossAllSetter(false, false) end
+	return true
+end
+
+Farm.StopBossAll = function()
+	if Farm.MultiBossEnabled and Farm.MultiBossMode == "all" then
+		farmSetMultiBoss(false, true)
+	end
 end
 
 Farm.StopMultiBoss = function()
@@ -9368,10 +9447,14 @@ local function BuildMultiBossPanel(parent, statusLbl, getBossSelection, setBossF
 				return
 			end
 
+			if Farm.MultiBossEnabled then
+				farmSetMultiBoss(false, true)
+			end
 			farmMultiBossClear()
 			farmMultiBossAdd(boss1)
 			farmMultiBossAdd(boss2)
 			Farm.MultiBossSecond = boss2
+			Farm.MultiBossMode = "multi"
 
 			if setBossFarmToggle then setBossFarmToggle(false, false) end
 			if setNormalFarmToggle then setNormalFarmToggle(false, false) end
@@ -9393,7 +9476,85 @@ local function BuildMultiBossPanel(parent, statusLbl, getBossSelection, setBossF
 	Farm.MultiBossSetter = multiSetter
 end
 
-function MobileUI:TagMenuItems(column, group)
+function MazxUI:BuildBossAllPanel(parent, statusLbl, setBossFarmToggle, setNormalFarmToggle)
+	Farm.MultiBossLabel = statusLbl
+	Section(parent, "Farm Boss All", true)
+
+	local selectedCount = label(parent, "", 11, T.Sub, Enum.Font.Gotham,
+		nil, UDim2.new(1, 0, 0, 24))
+	local function refreshCount()
+		local count = 0
+		for _, name in ipairs(BOSS_TYPES) do
+			if Farm.BossAllSelected[name] then count += 1 end
+		end
+		selectedCount.Text = "เลือกไว้ " .. count .. " / " .. #BOSS_TYPES .. " บอส"
+		selectedCount.TextColor3 = count > 0 and T.Mint or T.Sub
+		return count
+	end
+
+	local _, _, bossAllSetter = Section(parent, "Farm Boss All (เปิด/ปิด)", false, function(on)
+		if on then
+			if refreshCount() < 1 then
+				statusLbl.Text = "ติ๊กเลือกบอสอย่างน้อย 1 ตัวก่อน"
+				statusLbl.TextColor3 = T.Danger
+				if Farm.BossAllSetter then Farm.BossAllSetter(false, false) end
+				return
+			end
+
+			if setBossFarmToggle then setBossFarmToggle(false, false) end
+			if setNormalFarmToggle then setNormalFarmToggle(false, false) end
+
+			local ok, err = farmSetBossAll(true)
+			if not ok then
+				statusLbl.Text = tostring(err)
+				statusLbl.TextColor3 = T.Danger
+				if Farm.BossAllSetter then Farm.BossAllSetter(false, false) end
+				return
+			end
+
+			statusLbl.Text = "Farm Boss All • " .. farmMultiBossText()
+			statusLbl.TextColor3 = T.Mint
+		else
+			if Farm.MultiBossEnabled and Farm.MultiBossMode == "all" then
+				farmSetBossAll(false)
+			end
+			statusLbl.Text = "ปิด Farm Boss All แล้ว"
+			statusLbl.TextColor3 = T.Sub
+		end
+	end)
+	Farm.BossAllSetter = bossAllSetter
+
+	label(parent, "ติ๊กเฉพาะบอสที่ต้องการฟาร์ม • ตัวที่ไม่เกิดจะข้ามไปหาตัวที่เกิดอยู่",
+		10, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 38)).TextWrapped = true
+
+	for _, bossName in ipairs(BOSS_TYPES) do
+		Toggle(parent, "Boss • " .. bossName, Farm.BossAllSelected[bossName] == true, function(on)
+			Farm.BossAllSelected[bossName] = on and true or nil
+			local count = refreshCount()
+
+			if Farm.BossAllEnabled and Farm.MultiBossMode == "all" then
+				if count < 1 then
+					farmSetBossAll(false)
+					statusLbl.Text = "ไม่มีบอสที่เลือก • หยุด Farm Boss All"
+					statusLbl.TextColor3 = T.Danger
+					return
+				end
+				local ok, err = farmRefreshBossAllSelection()
+				if ok then
+					statusLbl.Text = "Farm Boss All • อัปเดตรายการแล้ว • " .. farmMultiBossText()
+					statusLbl.TextColor3 = T.Mint
+				else
+					statusLbl.Text = tostring(err)
+					statusLbl.TextColor3 = T.Danger
+				end
+			end
+		end)
+	end
+
+	refreshCount()
+end
+
+function MazxUI:TagMenuItems(column, group)
 	for _, item in ipairs(column:GetChildren()) do
 		if item:IsA("GuiObject") and not item:GetAttribute("MenuGroup") then
 			item:SetAttribute("MenuGroup", group)
@@ -9402,7 +9563,7 @@ function MobileUI:TagMenuItems(column, group)
 	end
 end
 
-local function BuildFarmPage(L, R)
+function MazxUI:BuildFarmPage(L, R)
 		local statusLbl = label(L, "พร้อม", 11, T.Mint, Enum.Font.Gotham,
 			UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 16))
 
@@ -9476,7 +9637,7 @@ local function BuildFarmPage(L, R)
 			end
 		end, statusLbl, "Mob")
 
-		MobileUI:TagMenuItems(L, "Mob")
+		MazxUI:TagMenuItems(L, "Mob")
 		local weaponOptions = farmScanWeaponOptions()
 		Dropdown(
 			L, "เลือกช่องอาวุธ", "ใช้ Item_Equip ช่อง 1-5",
@@ -9534,7 +9695,7 @@ local function BuildFarmPage(L, R)
 			end
 		end)
 
-		MobileUI:TagMenuItems(L, "Shared")
+		MazxUI:TagMenuItems(L, "Shared")
 		local _, _, raidChestSetter = Section(R, "คุมกล่องอัตโนมัติ • จุด 1-10", false, function(on)
 			Farm.RaidChest.Label = statusLbl
 			Farm.RaidChest:SetEnabled(on)
@@ -9544,7 +9705,7 @@ local function BuildFarmPage(L, R)
 		label(R, "วนวาปตรวจจุด 1-10 → ถ้ามีมอนเกิดให้ตีจนหมด → เปิดกล่อง → เก็บของ → ไปจุดถัดไป",
 			10, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 58)).TextWrapped = true
 
-		MobileUI:TagMenuItems(R, "Raids")
+		MazxUI:TagMenuItems(R, "Raids")
 		Slider(R, "Mob Hitbox Size", "ขนาด hitbox ของมอนที่ล็อก", 5, 40, Farm.Hitbox, " st", function(val)
 			Farm.Hitbox = val
 		end)
@@ -9636,7 +9797,8 @@ local function BuildFarmPage(L, R)
 		end, statusLbl, "Boss")
 
 		BuildMultiBossPanel(L, statusLbl, getBossSelection, setBossFarmToggle, setNormalFarmToggle)
-		MobileUI:TagMenuItems(L, "Boss")
+		MazxUI:BuildBossAllPanel(L, statusLbl, setBossFarmToggle, setNormalFarmToggle)
+		MazxUI:TagMenuItems(L, "Boss")
 
 		CombatRuntime.PerfLabel = label(R, "FPS / การโจมตี • รอเปิด Auto Attack", 11, T.Sub,
 			Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 42))
@@ -9683,7 +9845,7 @@ local function BuildFarmPage(L, R)
 			CombatRuntime.AdaptiveInterval = math.clamp(Farm.AttackInterval, 0.005, 0.08)
 		end)
 		label(R, "ลดภาระ: ส่งโจมตีครั้งละ 1 คำสั่ง", 11, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 24))
-		MobileUI:TagMenuItems(R, "Shared")
+		MazxUI:TagMenuItems(R, "Shared")
 end
 
 function TP.BuildPage(L, R)
@@ -9779,18 +9941,18 @@ end
 --------------------------------------------------------------
 -- TABS + NAV + UI PAGES
 --------------------------------------------------------------
-MobileUI.MenuGroups = {
+MazxUI.MenuGroups = {
 	{ Name = "Farm", Tabs = {
 		{ "Mob Farm", "Farm", "Mob" }, { "Boss Farm", "Farm", "Boss" },
 		{ "Quests", "Quest", "Quests" }, { "Dungeon", "Quest", "Dungeon" },
 		{ "Raids", "Farm", "Raids" }, { "Status", "Status" },
 	} },
 	{ Name = "World", Tabs = { { "World", "World" }, { "Teleport", "Teleport" } } },
-	{ Name = "Player", Tabs = { { "Player", "Player" }, { "Combat", "Combat" }, { "Visuals", "Visuals" } } },
+	{ Name = "Player", Tabs = { { "Player", "Player" }, { "Combat", "Combat" }, { "Visuals", "Visuals" }, { "Skill", "Skill" } } },
 	{ Name = "Setting", Tabs = { { "Settings", "Setting" } } },
 }
 
-function MobileUI:SelectMenuTab(entry)
+function MazxUI:SelectMenuTab(entry)
 	-- Never carry an expanded dropdown into another Farm/Boss tab.
 	if self.ActiveDropdownClose then self.ActiveDropdownClose() end
 	for name, page in pairs(pages) do page.Visible = name == entry[2] end
@@ -9812,7 +9974,7 @@ function MobileUI:SelectMenuTab(entry)
 	end
 end
 
-function MobileUI:SelectMenuGroup(group)
+function MazxUI:SelectMenuGroup(group)
 	activeTabSet = nil
 	for _, item in ipairs(tabs:GetChildren()) do if item:IsA("TextButton") then item:Destroy() end end
 	tabs.CanvasPosition = Vector2.new(0, 0)
@@ -9826,7 +9988,7 @@ end
 
 -- Keep page-building temporaries out of the startup function's register frame.
 -- Some executors compile with optimization disabled (200-register limit).
-function MobileUI:BuildMenuPages()
+function MazxUI:BuildMenuPages()
 MazxBoot.Stage = "building menu pages"
 local navItems = {
 	{"Farm",      "⚒"},
@@ -9836,6 +9998,7 @@ local navItems = {
 	{"Combat",    "⚔"},
 	{"Player",    "♟"},
 	{"Visuals",   "◈"},
+	{"Skill",     "S"},
 	{"Teleport",  "➤"},
 	{"Setting",   "⚙"},
 }
@@ -9851,7 +10014,7 @@ for i, v in ipairs(navItems) do
 	end
 
 	if v[1] == "Farm" then
-		BuildFarmPage(L, R)
+		MazxUI:BuildFarmPage(L, R)
 	end
 	if v[1] == "Status" then
 		BuildStatusPage(L, R)
@@ -9955,31 +10118,6 @@ for i, v in ipairs(navItems) do
 		local playerStatus = label(L, "พร้อม", 11, T.Mint, Enum.Font.Gotham,
 			UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 16))
 
-		-- Auto Skills first: keep it at the very top of the Player page.
-		Section(L, "สกิลอัตโนมัติ", false, function(on)
-			AutoSkills:SetEnabled(on)
-			playerStatus.Text = on and "เปิดสกิลอัตโนมัติแล้ว" or "ปิดสกิลอัตโนมัติแล้ว"
-		end)
-		AutoSkills.OnError = function() playerStatus.Text = "ส่งปุ่มสกิลไม่สำเร็จ" end
-		if MobileUI.Touch then
-			local skillHint = label(L, "สกิลออโต้บนมือถือขึ้นกับการรองรับปุ่มจำลองของตัวรัน", 11, T.Sub,
-				Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 42))
-			skillHint.TextWrapped = true
-		end
-		for _, key in ipairs(AutoSkills.Keys) do
-			local setting = AutoSkills.Settings[key]
-			Toggle(L, "สกิล " .. key, false, function(on)
-				setting.Enabled = on
-				setting.NextAt = 0
-				if not on and AutoSkills.Held and AutoSkills.Held.Name == key then AutoSkills:Release() end
-			end)
-			Slider(L, "ช่วงเวลากด " .. key, "",
-				0.1, 10, setting.Interval, " s", function(value)
-					setting.Interval = math.floor(value * 10 + 0.5) / 10
-					setting.NextAt = os.clock() + setting.Interval
-				end)
-		end
-
 		Section(L, "การเคลื่อนที่", true)
 		Toggle(L, "วิ่งไว", false, function(on)
 			playerModsSetSpeed(on)
@@ -10071,6 +10209,49 @@ for i, v in ipairs(navItems) do
 
 	end
 
+	if v[1] == "Skill" then
+		local skillStatus = label(L, "พร้อม", 11, T.Mint, Enum.Font.Gotham,
+			UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 16))
+
+		Section(L, "สกิลอัตโนมัติ", false, function(on)
+			AutoSkills:SetEnabled(on)
+			skillStatus.Text = on and "เปิดสกิลอัตโนมัติแล้ว" or "ปิดสกิลอัตโนมัติแล้ว"
+			skillStatus.TextColor3 = on and T.Mint or T.Sub
+		end)
+		AutoSkills.OnError = function()
+			skillStatus.Text = "ส่งปุ่มสกิลไม่สำเร็จ"
+			skillStatus.TextColor3 = T.Danger
+		end
+
+		if MazxUI.Touch then
+			local skillHint = label(L, "สกิลออโต้บนมือถือขึ้นกับการรองรับปุ่มจำลองของตัวรัน", 11, T.Sub,
+				Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 42))
+			skillHint.TextWrapped = true
+		end
+
+		for _, key in ipairs(AutoSkills.Keys) do
+			local setting = AutoSkills.Settings[key]
+			Toggle(L, "สกิล " .. key, false, function(on)
+				setting.Enabled = on
+				setting.NextAt = 0
+				if not on and AutoSkills.Held and AutoSkills.Held.Name == key then
+					AutoSkills:Release()
+				end
+			end)
+			Slider(L, "ช่วงเวลากด " .. key, "",
+				0.1, 10, setting.Interval, " s", function(value)
+					setting.Interval = math.floor(value * 10 + 0.5) / 10
+					setting.NextAt = os.clock() + setting.Interval
+				end)
+		end
+
+		Section(R, "Auto Skill", true)
+		label(R, "Z  X  C  V  B  N  K", 13, T.Text, Enum.Font.GothamBold,
+			nil, UDim2.new(1, 0, 0, 28))
+		label(R, "เปิดสกิลที่ต้องการทางซ้าย แล้วตั้ง Interval ของแต่ละสกิล", 11, T.Sub,
+			Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 42)).TextWrapped = true
+	end
+
 	if v[1] == "Visuals" then
 		Section(L, "ESP ผู้เล่น", false, function(on)
 			ESP.Enabled = on
@@ -10160,8 +10341,8 @@ for i, v in ipairs(navItems) do
 
 	if v[1] == "Setting" then
 		Section(R, "Performance / ประสิทธิภาพ", true)
-		Toggle(R, "ภาพต่ำ / FPS Boost", MobileUI.LowGraphics.Enabled, function(on)
-			MobileUI.LowGraphics:SetEnabled(on)
+		Toggle(R, "ภาพต่ำ / FPS Boost", MazxUI.LowGraphics.Enabled, function(on)
+			MazxUI.LowGraphics:SetEnabled(on)
 		end)
 		label(R, "ลดเงา เท็กซ์เจอร์ และเอฟเฟกต์ • ปิดเพื่อคืนภาพ", 11, T.Sub, Enum.Font.Gotham, nil, UDim2.new(1, 0, 0, 32))
 		Section(L, "ภาษา", true)
@@ -10193,21 +10374,21 @@ end
 if firstSelect then firstSelect() end
 end
 
-MobileUI:BuildMenuPages()
+MazxUI:BuildMenuPages()
 
 --------------------------------------------------------------
 -- OPEN / CLOSE
 --------------------------------------------------------------
-local isOpen = false
+MazxUI.IsOpen = false
 
-MobileUI.ColumnButton = new("TextButton", {
+MazxUI.ColumnButton = new("TextButton", {
 	Name = "ColumnSwitch", Size = UDim2.fromOffset(126, 44), Position = UDim2.fromOffset(8, 7),
 	BackgroundColor3 = T.Card, Text = "ปรับค่า →", TextSize = 12, TextColor3 = T.Accent,
 	Font = Enum.Font.GothamBold, AutoButtonColor = false, Visible = false, ZIndex = 6,
 }, top)
-corner(MobileUI.ColumnButton, 8)
+corner(MazxUI.ColumnButton, 8)
 
-function MobileUI:LayoutFor(width, height)
+function MazxUI:LayoutFor(width, height)
 	local compact = width < 780 or height < 430 or (self.Touch and width < 950)
 	return {
 		Compact = compact,
@@ -10216,7 +10397,7 @@ function MobileUI:LayoutFor(width, height)
 	}
 end
 
-function MobileUI:ClampPoint(x, y, width, height, viewWidth, viewHeight, centered)
+function MazxUI:ClampPoint(x, y, width, height, viewWidth, viewHeight, centered)
 	local ax, ay = centered and width * 0.5 or 0, centered and height * 0.5 or 0
 	local lowX, lowY = 4 + ax, 4 + ay
 	local highX, highY = math.max(lowX, viewWidth - width + ax - 4), math.max(lowY, viewHeight - height + ay - 4)
@@ -10225,7 +10406,7 @@ end
 
 -- Main window may be dragged mostly outside the screen.
 -- Keep only a small grab area visible so it cannot be lost permanently.
-function MobileUI:ClampWindowPoint(x, y, width, height, viewWidth, viewHeight)
+function MazxUI:ClampWindowPoint(x, y, width, height, viewWidth, viewHeight)
 	local keepVisible = 44
 	local halfW, halfH = width * 0.5, height * 0.5
 	local lowX = -halfW + keepVisible
@@ -10235,7 +10416,7 @@ function MobileUI:ClampWindowPoint(x, y, width, height, viewWidth, viewHeight)
 	return Vector2.new(math.clamp(x, lowX, highX), math.clamp(y, lowY, highY))
 end
 
-function MobileUI:ApplyColumns()
+function MazxUI:ApplyColumns()
 	for _, columns in pairs(self.Pages) do
 		for index, column in ipairs(columns) do
 			column.Visible = not self.Compact or index == self.Column
@@ -10249,7 +10430,7 @@ function MobileUI:ApplyColumns()
 	self.ColumnButton.Text = self.Column == 1 and "ปรับค่า →" or "← ตัวเลือก"
 end
 
-function MobileUI:Layout(recenter)
+function MazxUI:Layout(recenter)
 	local size = self.Surface.AbsoluteSize
 	if size.X < 1 or size.Y < 1 then return end
 	self:CancelDrags()
@@ -10295,7 +10476,7 @@ function MobileUI:Layout(recenter)
 	fab.Position = UDim2.fromOffset(point.X, point.Y)
 end
 
-function MobileUI:SafeArea()
+function MazxUI:SafeArea()
 	local ok, first, last = pcall(function() return GuiService:GetGuiInset() end)
 	local left, upper, rightInset, lower = 0, 0, 0, 0
 	if ok then left, upper, rightInset, lower = first.X, first.Y, last.X, last.Y end
@@ -10303,28 +10484,28 @@ function MobileUI:SafeArea()
 	self.Surface.Size = UDim2.new(1, -left - rightInset, 1, -upper - lower)
 end
 
-local function setOpen(state)
-	isOpen = state
-	MobileUI:CancelDrags()
-	if not state and MobileUI.ActiveDropdownClose then
-		MobileUI.ActiveDropdownClose()
+function MazxUI:SetOpen(state)
+	self.IsOpen = state == true
+	self:CancelDrags()
+	if not self.IsOpen and self.ActiveDropdownClose then
+		self.ActiveDropdownClose()
 	end
-	if state then
-		MobileUI:Layout(false)
+	if self.IsOpen then
+		self:Layout(false)
 		Appearance:SetOpacity(Appearance.Opacity)
 	end
-	main.Visible = state
+	main.Visible = self.IsOpen
 	Farm._inputPauseUntil = math.max(Farm._inputPauseUntil, os.clock() + 0.25)
-	if state then CombatRuntime:Release(true) end
+	if self.IsOpen then CombatRuntime:Release(true) end
 end
 
-MobileUI.ColumnButton.Activated:Connect(function()
-	MobileUI:CancelDrags()
-	MobileUI.Column = MobileUI.Column == 1 and 2 or 1
-	MobileUI:ApplyColumns()
+MazxUI.ColumnButton.Activated:Connect(function()
+	MazxUI:CancelDrags()
+	MazxUI.Column = MazxUI.Column == 1 and 2 or 1
+	MazxUI:ApplyColumns()
 end)
 
-function MobileUI:BindDrag(handle, target, centered, tap)
+function MazxUI:BindDrag(handle, target, centered, tap)
 	local held, start, startPosition, moved
 	local function cancel() held, start, startPosition = nil, nil, nil end
 	self.Drags[cancel] = true
@@ -10359,31 +10540,30 @@ function MobileUI:BindDrag(handle, target, centered, tap)
 	end)
 end
 
-MobileUI:BindDrag(fab, fab, false, function() setOpen(not isOpen) end)
-MobileUI:BindDrag(new("Frame", {
+MazxUI:BindDrag(fab, fab, false, function() MazxUI:SetOpen(not MazxUI.IsOpen) end)
+MazxUI:BindDrag(new("Frame", {
 	Name = "WindowDrag", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = true, ZIndex = 4,
 }, top), main, true)
 
-close.Activated:Connect(function() setOpen(false) end)
-MobileUI:Connect(UserInputService.InputBegan, function(input, processed)
-	if not processed and input.KeyCode == Enum.KeyCode.RightShift then setOpen(not isOpen) end
+close.Activated:Connect(function() MazxUI:SetOpen(false) end)
+MazxUI:Connect(UserInputService.InputBegan, function(input, processed)
+	if not processed and input.KeyCode == Enum.KeyCode.RightShift then MazxUI:SetOpen(not MazxUI.IsOpen) end
 end)
-MobileUI:Connect(UserInputService.WindowFocusReleased, function() MobileUI:CancelDrags() end)
-MobileUI:Connect(MobileUI.Surface:GetPropertyChangedSignal("AbsoluteSize"), function() MobileUI:Layout(true) end)
-MobileUI:Connect(workspace:GetPropertyChangedSignal("CurrentCamera"), function() MobileUI:SafeArea(); MobileUI:Layout(true) end)
+MazxUI:Connect(UserInputService.WindowFocusReleased, function() MazxUI:CancelDrags() end)
+MazxUI:Connect(MazxUI.Surface:GetPropertyChangedSignal("AbsoluteSize"), function() MazxUI:Layout(true) end)
+MazxUI:Connect(workspace:GetPropertyChangedSignal("CurrentCamera"), function() MazxUI:SafeArea(); MazxUI:Layout(true) end)
 pcall(function()
-	MobileUI:Connect(GuiService:GetPropertyChangedSignal("TopbarInset"), function()
-		MobileUI:SafeArea(); MobileUI:Layout(true)
+	MazxUI:Connect(GuiService:GetPropertyChangedSignal("TopbarInset"), function()
+		MazxUI:SafeArea(); MazxUI:Layout(true)
 	end)
 end)
 gui.Destroying:Connect(function()
-	MobileUI:CancelDrags()
-	for _, connection in ipairs(MobileUI.Connections) do connection:Disconnect() end
-	MobileUI.Connections, MobileUI.Drags = {}, {}
+	MazxUI:CancelDrags()
+	for _, connection in ipairs(MazxUI.Connections) do connection:Disconnect() end
+	MazxUI.Connections, MazxUI.Drags = {}, {}
 end)
-MobileUI:SafeArea()
-MobileUI:Layout(true)
-if MobileUI.Touch then setOpen(true) end
+MazxUI:SafeArea()
+MazxUI:Layout(true)
 -- END MAZXHUB UI
 end
 
@@ -10395,7 +10575,7 @@ if startupOK then
 	MazxBoot.Finished = true
 	MazxBoot.Stage = "ready"
 	if MazxBoot.Panel then pcall(function() MazxBoot.Panel:Destroy() end) end
-	warn("[Mazxhub/android-startup-1] READY")
+	warn("[Mazxhub/startup-1] READY")
 else
 	MazxBoot:Fail(startupError)
 end
