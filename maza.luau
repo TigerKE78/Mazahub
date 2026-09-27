@@ -17,7 +17,8 @@ function MazxBoot:Show(message, failed)
 			self.Panel = screen
 			local body = Instance.new("Frame")
 			body.Size = UDim2.new(0.9, 0, 0, 200)
-			body.Position = UDim2.new(0.05, 0, 0.12, 0)
+			body.AnchorPoint = Vector2.new(0.5, 0)
+			body.Position = UDim2.new(0.5, 0, 0, 18)
 			body.BackgroundColor3 = Color3.fromRGB(15, 25, 40)
 			body.Parent = screen
 			local text = Instance.new("TextLabel")
@@ -2414,7 +2415,7 @@ pcall(function()
 end)
 
 local FARM_PATH  = { "Humanoids", "Regions", "Windy Peak", "ActiveNpcs" }
-local FARM_TYPES = { "Bandit", "Civilian", "Bear Cub", "Kaiden Subordinate", "Hoyuzo Subordinate", "Beast Born Demon", "Fire Profound Demon" }
+local FARM_TYPES = { "Bandit", "Civilian", "Bear Cub", "Kaiden Subordinate", "Hoyuzo Subordinate", "Beast Born Demon", "Ice Profound Demon", "Fire Profound Demon" }
 local BOSS_QUEST_SPECS = {
 	Zuko = {
 		Text = "Ill take the bandit boss(Lv 7)",
@@ -2492,7 +2493,7 @@ local function farmActiveFolderForName(name)
 		local harbor = regions and regions:FindFirstChild("Mistfall Harbor")
 		return harbor and harbor:FindFirstChild("ActiveNpcs")
 	end
-	if wanted == "fire profound demon" then
+	if wanted == "ice profound demon" or wanted == "fire profound demon" then
 		local humanoids = workspace:FindFirstChild("Humanoids")
 		local regions = humanoids and humanoids:FindFirstChild("Regions")
 		local iceveil = regions and regions:FindFirstChild("Iceveil Valley")
@@ -2941,9 +2942,10 @@ local function farmGetSignal()
 	return nil
 end
 
+local MITSU_LV105_QUEST = "Ill drive back the frost(Lv 105)"
 local MITSU_LV115_QUEST = "Ill put out the blaze(Lv 115)"
 
-local function farmAcceptMitsuLv115Quest()
+local function farmAcceptMitsuQuest(questText)
 	local char = player.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -2952,6 +2954,7 @@ local function farmAcceptMitsuLv115Quest()
 		return false, "ตัวละครยังไม่พร้อม"
 	end
 	if not ev then return false, "ไม่พบ SignalEvent" end
+	if type(questText) ~= "string" or questText == "" then return false, "ไม่มีชื่อเควส" end
 
 	local npc = tpFindNPC("Demon Slayer Mitsu")
 	local npcCf = farmCFrameOf(npc) or TP.Destination("Demon Slayer Mitsu")
@@ -2966,16 +2969,24 @@ local function farmAcceptMitsuLv115Quest()
 	pcall(function() ev:FireServer("NpcTalking", "Ended") end)
 	task.wait(0.12)
 	local ok, err = pcall(function()
-		ev:FireServer("AddQuest", MITSU_LV115_QUEST)
+		ev:FireServer("AddQuest", questText)
 	end)
 	if not ok then return false, tostring(err) end
 	task.wait(0.12)
 	pcall(function() ev:FireServer("NpcTalking", "Ended") end)
 
-	Farm._acceptedQuestText = MITSU_LV115_QUEST
+	Farm._acceptedQuestText = questText
 	Farm._questNeeded = false
 	Farm._lastQuestAt = os.clock()
 	return true
+end
+
+local function farmAcceptMitsuLv105Quest()
+	return farmAcceptMitsuQuest(MITSU_LV105_QUEST)
+end
+
+local function farmAcceptMitsuLv115Quest()
+	return farmAcceptMitsuQuest(MITSU_LV115_QUEST)
 end
 
 local function farmCurrentQuestSpec()
@@ -3024,6 +3035,15 @@ local function farmCurrentQuestSpec()
 			TargetName = "Beast Born Demon",
 			NPCName = "Rin",
 			ExactGroupSize = 3,
+		}
+	end
+	if type(Farm.MobName) == "string" and Farm.MobName:lower() == "ice profound demon" then
+		return {
+			Text = MITSU_LV105_QUEST,
+			TargetName = "Ice Profound Demon",
+			NPCName = "Demon Slayer Mitsu",
+			RequiredKills = 9,
+			ExactGroupSize = 9,
 		}
 	end
 	if type(Farm.MobName) == "string" and Farm.MobName:lower() == "fire profound demon" then
@@ -3344,12 +3364,14 @@ end
 -- The explicit UnHold signal is sent on release as a fallback for the game.
 local DamageBlock = {
 	Holding = false,
+	ThreatHolding = false,
 	Until = 0,
 	Generation = 0,
 	Input = nil,
 }
 
 function DamageBlock:Release()
+	self.ThreatHolding = false
 	if not self.Holding then return end
 	self.Holding = false
 	self.Generation += 1
@@ -3394,10 +3416,190 @@ function DamageBlock:Hold(seconds)
 			if remaining <= 0 then break end
 			task.wait(math.min(remaining, 0.1))
 		end
-		if self.Holding and self.Generation == generation and os.clock() >= self.Until then
+		if self.Holding and self.Generation == generation and os.clock() >= self.Until
+			and not self.ThreatHolding then
 			self:Release()
 		end
 	end)
+end
+
+function DamageBlock:BeginThreatHold()
+	self.ThreatHolding = true
+	if self.Holding then return end
+	self.Holding = true
+	self.Generation += 1
+	local input = game:GetService("VirtualInputManager")
+	self.Input = input
+	pcall(function()
+		input:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+	end)
+end
+
+function DamageBlock:EndThreatHold()
+	self.ThreatHolding = false
+	if self.Holding and os.clock() >= self.Until then
+		self:Release()
+	end
+end
+
+Farm.MobGuard = {
+	Target = nil,
+	NextScanAt = 0,
+	NextStateRefreshAt = 0,
+	StateObjects = {},
+	Blocking = false,
+	Attacking = false,
+	ThreatUntil = 0,
+	LastPlayerHealth = nil,
+}
+
+function Farm.MobGuard:Reset()
+	self.Target = nil
+	self.NextScanAt = 0
+	self.NextStateRefreshAt = 0
+	self.StateObjects = {}
+	self.Blocking = false
+	self.Attacking = false
+	self.ThreatUntil = 0
+	self.LastPlayerHealth = nil
+	DamageBlock:EndThreatHold()
+end
+
+function Farm.MobGuard:OnPlayerHealth(health)
+	if type(health) ~= "number" then return end
+	if type(self.LastPlayerHealth) == "number" and health < self.LastPlayerHealth then
+		self.ThreatUntil = math.max(self.ThreatUntil or 0, os.clock() + 0.65)
+	end
+	self.LastPlayerHealth = health
+end
+
+function Farm.MobGuard:IsTrueState(value)
+	if type(value) == "boolean" then return value end
+	if type(value) == "number" then return value > 0 end
+	if type(value) == "string" then
+		local v = value:lower()
+		return v == "true" or v == "1" or v == "blocking" or v == "attacking"
+	end
+	return false
+end
+
+function Farm.MobGuard:StateKind(name)
+	local n = tostring(name or ""):lower():gsub("[%s_%-]", "")
+	if n == "blocking" or n == "isblocking" or n == "block"
+		or n == "guarding" or n == "isguarding" or n == "guard" then
+		return "block"
+	end
+	if n == "attacking" or n == "isattacking" or n == "attackactive"
+		or n == "swinging" or n == "isswinging" then
+		return "attack"
+	end
+	return nil
+end
+
+function Farm.MobGuard:RefreshStateObjects(target)
+	self.StateObjects = {}
+	if not target or not target.Parent then return end
+	for _, object in ipairs(target:GetDescendants()) do
+		local kind = self:StateKind(object.Name)
+		if kind and (object:IsA("BoolValue") or object:IsA("IntValue")
+			or object:IsA("NumberValue") or object:IsA("StringValue")) then
+			table.insert(self.StateObjects, { Object = object, Kind = kind })
+		end
+	end
+end
+
+function Farm.MobGuard:ReadVisibleState(target)
+	local blocking, attacking = false, false
+	local hum = target and target:FindFirstChildWhichIsA("Humanoid", true)
+	for _, root in ipairs({ target, hum }) do
+		if root then
+			for name, value in pairs(root:GetAttributes()) do
+				local kind = self:StateKind(name)
+				if kind and self:IsTrueState(value) then
+					if kind == "block" then blocking = true else attacking = true end
+				end
+			end
+		end
+	end
+
+	for _, record in ipairs(self.StateObjects) do
+		local object = record.Object
+		if object and object.Parent and self:IsTrueState(object.Value) then
+			if record.Kind == "block" then blocking = true else attacking = true end
+		end
+	end
+
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+	if animator then
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+			if track.IsPlaying then
+				local animation = track.Animation
+				local raw = (tostring(track.Name or "") .. " "
+					.. tostring(animation and animation.Name or "")):lower()
+				local compact = raw:gsub("[%s_%-]", "")
+				local brokenGuard = compact:find("blockbreak", 1, true)
+					or compact:find("guardbreak", 1, true)
+				if not brokenGuard and (compact:find("block", 1, true)
+					or compact:find("guard", 1, true)
+					or compact:find("parry", 1, true)) then
+					blocking = true
+				end
+				if not blocking and not compact:find("hurt", 1, true)
+					and not compact:find("stun", 1, true)
+					and not compact:find("idle", 1, true)
+					and (compact:find("attack", 1, true)
+						or compact:find("swing", 1, true)
+						or compact:find("slash", 1, true)
+						or compact:find("strike", 1, true)
+						or compact:find("punch", 1, true)
+						or compact:find("kick", 1, true)
+						or compact:find("m1", 1, true)) then
+					attacking = true
+				end
+			end
+		end
+	end
+	return blocking, attacking
+end
+
+function Farm.MobGuard:Step(target)
+	if not target or not target.Parent then
+		self:Reset()
+		return nil
+	end
+
+	local now = os.clock()
+	if self.Target ~= target then
+		self.Target = target
+		self.NextScanAt = 0
+		self.NextStateRefreshAt = 0
+		self.StateObjects = {}
+		self.Blocking = false
+		self.Attacking = false
+		self.ThreatUntil = 0
+	end
+
+	if now >= self.NextStateRefreshAt then
+		self.NextStateRefreshAt = now + 1
+		self:RefreshStateObjects(target)
+	end
+	if now >= self.NextScanAt then
+		self.NextScanAt = now + 0.05
+		self.Blocking, self.Attacking = self:ReadVisibleState(target)
+	end
+
+	if self.Attacking then
+		self.ThreatUntil = math.max(self.ThreatUntil or 0, now + 0.12)
+	end
+
+	if self.Attacking or now < (self.ThreatUntil or 0) then
+		DamageBlock:BeginThreatHold()
+		return "guard"
+	end
+
+	DamageBlock:EndThreatHold()
+	if self.Blocking then return "target-blocking" end
+	return nil
 end
 
 -- Client-side only: suppress obvious hurt/stun reaction tracks so Auto Attack
@@ -3538,10 +3740,17 @@ function FarmRetreat:Watch()
 	self:Stop()
 	self.Humanoid = hum
 	if not hum then return end
+	Farm.MobGuard.LastPlayerHealth = hum.Health
 	self.Connection = hum.HealthChanged:Connect(function(health)
 		if player.Character ~= char then return end
+		Farm.MobGuard:OnPlayerHealth(health)
 		-- Taking damage must NEVER move/teleport the player. Only death cleans up.
-		if health <= 0 then self:Clear(); Farm._attackTarget = nil; return end
+		if health <= 0 then
+			Farm.MobGuard:Reset()
+			self:Clear()
+			Farm._attackTarget = nil
+			return
+		end
 	end)
 end
 
@@ -4937,6 +5146,18 @@ local function attackSwing()
 		CombatRuntime.NextAttackAt = now + (Farm.FastAttack and 0.005 or 0.05)
 		return
 	end
+
+	local guardState = Farm.MobGuard:Step(Farm._attackTarget)
+	if guardState then
+		CombatRuntime:ReleaseAttack()
+		if guardState == "guard" then
+			CombatRuntime.State = "มอนกำลังตี • กด F ป้องกัน"
+		else
+			CombatRuntime.State = "มอนกำลัง Block • หยุดตี"
+		end
+		CombatRuntime.NextAttackAt = now + 0.05
+		return
+	end
 	if Farm._skillHeld or now < (Farm._skillReadyAt or 0) then
 		CombatRuntime:ReleaseAttack()
 		CombatRuntime:RestoreSwingAnimations()
@@ -5046,6 +5267,7 @@ end
 local function attackStop()
 	Farm.AutoAttack = false
 	if Farm._attackConn then Farm._attackConn:Disconnect(); Farm._attackConn = nil end
+	Farm.MobGuard:Reset()
 	CombatRuntime:UnbindGameComboGate()
 	CombatRuntime:Release()
 end
@@ -9084,11 +9306,16 @@ local function BuildFarmPage(L, R)
 
 				Farm.BossEnabled = false
 
-				-- Fire Profound Demon must take Mitsu's Lv115 quest first.
-				if type(Farm.MobName) == "string" and Farm.MobName:lower() == "fire profound demon" then
-					statusLbl.Text = "กำลังไปรับเควส Mitsu Lv115..."
+				-- Ice/Fire Profound Demon must take Mitsu's quest before farming.
+				local mobLower = type(Farm.MobName) == "string" and Farm.MobName:lower() or ""
+				local mitsuQuest = mobLower == "ice profound demon" and MITSU_LV105_QUEST
+					or mobLower == "fire profound demon" and MITSU_LV115_QUEST
+				if mitsuQuest then
+					statusLbl.Text = mobLower == "ice profound demon"
+						and "กำลังไปรับเควส Mitsu Lv105..."
+						or "กำลังไปรับเควส Mitsu Lv115..."
 					statusLbl.TextColor3 = T.Gold
-					local accepted, questErr = farmAcceptMitsuLv115Quest()
+					local accepted, questErr = farmAcceptMitsuQuest(mitsuQuest)
 					if not accepted then
 						statusLbl.Text = "รับเควส Mitsu ไม่สำเร็จ: " .. tostring(questErr)
 						statusLbl.TextColor3 = T.Danger
@@ -9165,13 +9392,24 @@ local function BuildFarmPage(L, R)
 			farmResetQuest("auto quest toggle")
 		end)
 
+		Button(L, "⟶ รับเควส Mitsu Lv105", T.Card, function()
+			local ok, err = farmAcceptMitsuLv105Quest()
+			if ok then
+				statusLbl.Text = "รับเควส Mitsu • Ill drive back the frost(Lv 105) แล้ว"
+				statusLbl.TextColor3 = T.Mint
+			else
+				statusLbl.Text = "รับเควส Mitsu Lv105 ไม่สำเร็จ: " .. tostring(err)
+				statusLbl.TextColor3 = T.Danger
+			end
+		end)
+
 		Button(L, "⟶ รับเควส Mitsu Lv115", T.Card, function()
 			local ok, err = farmAcceptMitsuLv115Quest()
 			if ok then
 				statusLbl.Text = "รับเควส Mitsu • Ill put out the blaze(Lv 115) แล้ว"
 				statusLbl.TextColor3 = T.Mint
 			else
-				statusLbl.Text = "รับเควส Mitsu ไม่สำเร็จ: " .. tostring(err)
+				statusLbl.Text = "รับเควส Mitsu Lv115 ไม่สำเร็จ: " .. tostring(err)
 				statusLbl.TextColor3 = T.Danger
 			end
 		end)
@@ -10000,10 +10238,9 @@ function MobileUI:BindDrag(handle, target, centered, tap)
 end
 
 MobileUI:BindDrag(fab, fab, false, function() setOpen(not isOpen) end)
-local dragHandle = new("Frame", {
+MobileUI:BindDrag(new("Frame", {
 	Name = "WindowDrag", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Active = true, ZIndex = 4,
-}, top)
-MobileUI:BindDrag(dragHandle, main, true)
+}, top), main, true)
 
 close.Activated:Connect(function() setOpen(false) end)
 MobileUI:Connect(UserInputService.InputBegan, function(input, processed)
